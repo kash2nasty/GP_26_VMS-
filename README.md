@@ -87,8 +87,17 @@ tracking/landmarks.py      Landmark index constants (iris, eye corners)
 session/voms_session.py    Session API + result assembly
 session/metrics.py         Peak detection, angular velocity, gaze stability math
 run_session.py             CLI entrypoint
+tests/test_gaze_sign.py    Regression tests for the iris sign convention
 models/                    face_landmarker.task
 sessions/                  Saved session JSON
+```
+
+### Tests
+
+Plain asserts, no pytest required:
+
+```powershell
+python tests/test_gaze_sign.py
 ```
 
 ### Programmatic API
@@ -182,6 +191,15 @@ explained by smooth compensation, i.e. saccadic intrusions and fixation breaks.
 center and roughly ±0.5 spans the socket. Measured in a local frame built from the eye corners,
 so it rotates with the head rather than the camera — this is what separates *eye* movement from
 *head* movement.
+
+**Sign convention (load-bearing):** the two eyes' outer/temple corners sit on opposite sides of
+the face midline, so measuring each eye toward its own outer corner gives the eyes *opposing*
+signs during VOR — when both eyes are in fact rotating the same real-world direction. Since the
+session layer averages the eyes together, that cancels the physiological signal almost exactly
+and collapses `compensation_r2` toward 0 on perfectly good data. `both_iris_offsets()` in
+`tracking/face_tracker.py` owns the normalization and is the single source of truth for it;
+`tests/test_gaze_sign.py` pins it. Session JSON written before this was fixed has meaningless
+`gaze_stability` numbers.
 
 **Degree caveat:** `residual_rms_deg_approx` uses a fixed anatomical constant
 (`NOMINAL_DEG_PER_OFFSET_UNIT = 140`), **not** a per-user calibration. Treat degree values as

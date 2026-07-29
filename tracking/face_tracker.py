@@ -27,8 +27,8 @@ class FrameRecord:
     head_pitch: float | None       # degrees, + = looking up
     head_yaw: float | None         # degrees, + = turning to subject's left
     head_roll: float | None        # degrees, + = tilting to subject's right
-    left_iris_offset: list | None   # [horizontal, vertical], eye-socket-normalized
-    right_iris_offset: list | None
+    left_iris_offset: list | None   # [horizontal, vertical], eye-socket-normalized.
+    right_iris_offset: list | None  # horizontal: + = toward subject's right, both eyes.
     landmark_confidence: float | None
 
     def to_dict(self):
@@ -50,13 +50,19 @@ def _euler_from_matrix(matrix: np.ndarray) -> tuple[float, float, float]:
     return math.degrees(pitch), math.degrees(yaw), math.degrees(roll)
 
 
-def _iris_offset(pts, iris_idx, outer_idx, inner_idx, top_idx, bottom_idx):
+def _iris_offset(pts, iris_idx, outer_idx, inner_idx, top_idx, bottom_idx, lateral_sign):
     """Iris center offset inside its own eye socket, in socket-relative units.
 
     Builds a local 2D frame from the eye corners so the measurement rotates with
     the head instead of with the camera. Returns [horizontal, vertical] where 0,0
     means the iris sits at the socket center; roughly +/-0.5 spans the socket.
-    Positive horizontal = toward the outer (temple) corner.
+
+    lateral_sign flips the horizontal axis so positive means "toward the
+    subject's right" for BOTH eyes. Without this, the left eye's "outer"
+    corner is on the subject's left while the right eye's "outer" corner is on
+    the subject's right, so during VOR (both eyes rotating the same real-world
+    direction to compensate for head yaw) the two eyes' raw offsets would carry
+    opposite signs and cancel when averaged together.
     """
     iris = pts[iris_idx][:2]
     outer = pts[outer_idx][:2]
@@ -81,7 +87,37 @@ def _iris_offset(pts, iris_idx, outer_idx, inner_idx, top_idx, bottom_idx):
         height = width * 0.5  # squinting/blink guard
 
     d = iris - socket_center
-    return [float(np.dot(d, axis_u) / width), float(np.dot(d, perp_u) / height)]
+    horizontal = (np.dot(d, axis_u) / width) * lateral_sign
+    return [float(horizontal), float(np.dot(d, perp_u) / height)]
+
+
+# The two eyes' outer (temple) corners sit on opposite sides of the face midline,
+# so measuring each eye toward its own outer corner gives the eyes OPPOSING signs
+# during VOR -- where both eyes rotate the same real-world direction to
+# compensate for head yaw. The session layer averages the eyes together, so that
+# cancels the physiological signal and collapses compensation_r2. These signs
+# normalize both eyes onto one shared real-world direction. Keep this as the
+# single source of truth for the convention; tests/test_gaze_sign.py pins it.
+_LEFT_LATERAL_SIGN = -1.0
+_RIGHT_LATERAL_SIGN = 1.0
+
+
+def both_iris_offsets(pts):
+    """Per-eye [horizontal, vertical] iris offsets in a shared sign convention.
+
+    Returns (left, right); either may be None if that eye's geometry was
+    degenerate. Positive horizontal means the same real-world direction for both
+    eyes, which is what makes averaging them valid downstream.
+    """
+    left = _iris_offset(
+        pts, LM.LEFT_IRIS_CENTER, LM.LEFT_EYE_OUTER, LM.LEFT_EYE_INNER,
+        LM.LEFT_EYE_TOP, LM.LEFT_EYE_BOTTOM, lateral_sign=_LEFT_LATERAL_SIGN,
+    )
+    right = _iris_offset(
+        pts, LM.RIGHT_IRIS_CENTER, LM.RIGHT_EYE_OUTER, LM.RIGHT_EYE_INNER,
+        LM.RIGHT_EYE_TOP, LM.RIGHT_EYE_BOTTOM, lateral_sign=_RIGHT_LATERAL_SIGN,
+    )
+    return left, right
 
 
 class FaceTracker:
@@ -126,14 +162,7 @@ class FaceTracker:
         has_iris = len(face) > LM.RIGHT_IRIS_CENTER
         left = right = None
         if has_iris:
-            left = _iris_offset(
-                pts, LM.LEFT_IRIS_CENTER, LM.LEFT_EYE_OUTER, LM.LEFT_EYE_INNER,
-                LM.LEFT_EYE_TOP, LM.LEFT_EYE_BOTTOM,
-            )
-            right = _iris_offset(
-                pts, LM.RIGHT_IRIS_CENTER, LM.RIGHT_EYE_OUTER, LM.RIGHT_EYE_INNER,
-                LM.RIGHT_EYE_TOP, LM.RIGHT_EYE_BOTTOM,
-            )
+            left, right = both_iris_offsets(pts)
 
         # The Tasks API exposes no per-face score here, so we report presence-based
         # confidence: the fraction of landmarks that fall inside the frame bounds.
