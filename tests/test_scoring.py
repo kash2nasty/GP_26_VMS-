@@ -19,6 +19,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from scoring import exercises as ex                              # noqa: E402
+from scoring import protocol as prot                             # noqa: E402
 from scoring import severity as sev                              # noqa: E402
 from scoring.pipeline import enrich_session                      # noqa: E402
 
@@ -39,6 +40,15 @@ def make_session(
     reps=5,
     gaze_shape="full",   # "full" | "absent_keys" | "null_values"
     head_shape="full",   # "full" | "absent_keys"
+    # Head-motion defaults are deliberately protocol-faithful (160 deg sweeps at
+    # 1.2 s, low off-axis motion) so the baseline fixture raises no advisory flags
+    # and each deviation test has to opt in to exactly one deviation.
+    amplitude=160.0,
+    sweep_duration=1.2,
+    sweep_cv=0.10,
+    roll=15.0,
+    pitch=12.0,
+    blinks_excluded=0,
 ):
     """Build a synthetic session dict in the shape voms_session.py really emits."""
     if gaze_shape == "absent_keys":
@@ -70,6 +80,8 @@ def make_session(
             "iris_std_during_motion_offset_units": 0.0896,
             "fixation_stability_score": fixation,
             "insufficient_data": False,
+            "frames_excluded_blink": blinks_excluded,
+            "min_eye_aperture_ratio": 0.15,
         }
 
     head = (
@@ -80,9 +92,13 @@ def make_session(
             "completed_reps": reps,
             "total_sweeps": reps * 2,
             "reached_target_reps": reps >= 5,
-            "yaw_range_deg": 84.0,
-            "mean_sweep_amplitude_deg": 75.57,
-            "mean_peak_angular_velocity_dps": 55.42,
+            "yaw_range_deg": amplitude / 2.0,
+            "mean_sweep_amplitude_deg": amplitude,
+            "mean_peak_angular_velocity_dps": 133.0,
+            "mean_sweep_duration_s": sweep_duration,
+            "sweep_duration_cv": sweep_cv,
+            "roll_range_deg": roll,
+            "pitch_range_deg": pitch,
         }
     )
 
@@ -460,6 +476,179 @@ def test_reported_weights_reproduce_the_reported_composite():
     formula = out["method"]["composite_formula"]
     assert f"{parts['symptom_weight']:.2f}" in formula, formula
     assert f"{parts['instability_weight']:.2f}" in formula, formula
+
+
+# ---- protocol fidelity ---------------------------------------------------
+
+def test_protocol_faithful_session_raises_no_flags():
+    """Guards the deviation tests against a fixture that always deviates."""
+    fid = prot.assess(make_session())
+    assert fid["advisory_flags"] == [], fid["advisory_flags"]
+    assert fid["comparable_to_clinical_protocol"] is True
+    assert fid["amplitude_ratio"] == 1.0, fid["amplitude_ratio"]
+    assert fid["pace_ratio"] == 1.0, fid["pace_ratio"]
+
+
+def test_reference_matches_published_protocol():
+    """80 deg each side => 160 deg per sweep; 50 bpm => 1.2 s per sweep."""
+    ref = prot.assess(make_session())["reference"]
+    assert ref["sweep_amplitude_deg"] == 160.0
+    assert ref["cadence_bpm"] == 50.0
+    assert round(ref["sweep_duration_s"], 3) == 1.2
+    assert ref["reps"] == 5
+
+
+def test_low_amplitude_is_flagged():
+    fid = prot.assess(make_session(amplitude=76.0))
+    assert "amplitude_below_protocol" in fid["advisory_flags"], fid["advisory_flags"]
+    assert fid["comparable_to_clinical_protocol"] is False
+
+
+def test_high_amplitude_is_flagged():
+    fid = prot.assess(make_session(amplitude=220.0))
+    assert "amplitude_above_protocol" in fid["advisory_flags"]
+
+
+def test_slow_pace_is_flagged():
+    """A longer sweep duration is a slower pace."""
+    fid = prot.assess(make_session(sweep_duration=2.94))
+    assert "pace_slower_than_protocol" in fid["advisory_flags"], fid["advisory_flags"]
+    assert fid["pace_ratio"] < 1.0, fid["pace_ratio"]
+    assert fid["observed"]["effective_cadence_bpm"] < 50.0
+
+
+def test_fast_pace_is_flagged():
+    fid = prot.assess(make_session(sweep_duration=0.5))
+    assert "pace_faster_than_protocol" in fid["advisory_flags"]
+    assert fid["pace_ratio"] > 1.0
+
+
+def test_inconsistent_pace_is_flagged():
+    fid = prot.assess(make_session(sweep_cv=0.60))
+    assert "pace_inconsistent_within_session" in fid["advisory_flags"]
+
+
+def test_excessive_off_axis_motion_is_flagged():
+    assert "excessive_roll" in prot.assess(make_session(roll=58.6))["advisory_flags"]
+    assert "excessive_pitch" in prot.assess(make_session(pitch=30.1))["advisory_flags"]
+
+
+def test_clean_off_axis_motion_is_not_flagged():
+    flags = prot.assess(make_session(roll=20.0, pitch=15.0))["advisory_flags"]
+    assert "excessive_roll" not in flags
+    assert "excessive_pitch" not in flags
+
+
+def test_fewer_reps_than_protocol_is_flagged():
+    assert "fewer_reps_than_protocol" in prot.assess(
+        make_session(reps=3)
+    )["advisory_flags"]
+
+
+def test_missing_head_motion_reports_unknown_not_compliant():
+    """Absent data must never read as protocol-faithful."""
+    fid = prot.assess(make_session(head_shape="absent_keys"))
+    assert "amplitude_unknown" in fid["advisory_flags"]
+    assert "pace_unknown" in fid["advisory_flags"]
+    assert fid["comparable_to_clinical_protocol"] is False
+
+
+def test_real_measured_session_deviates_from_protocol():
+    """Pinned to the actual capture: ~76 deg sweeps at ~1.65 s, roll ~58.6 deg.
+
+    The tool previously reported a tier off this motion with no indication it was
+    at roughly half protocol amplitude.
+    """
+    fid = prot.assess(make_session(
+        amplitude=75.83, sweep_duration=1.6527, sweep_cv=0.163,
+        roll=58.62, pitch=30.14,
+    ))
+    assert "amplitude_below_protocol" in fid["advisory_flags"]
+    assert "excessive_roll" in fid["advisory_flags"]
+    assert "excessive_pitch" in fid["advisory_flags"]
+    # Pace was within tolerance and intra-session CV was steady.
+    assert "pace_slower_than_protocol" not in fid["advisory_flags"]
+    assert "pace_inconsistent_within_session" not in fid["advisory_flags"]
+    assert fid["comparable_to_clinical_protocol"] is False
+
+
+def test_pace_is_recovered_from_sweeps_for_older_sessions():
+    """A pre-upgrade capture has sweeps[] but no aggregate pace fields."""
+    session = make_session(amplitude=75.83)
+    head = session["head_motion"]
+    del head["mean_sweep_duration_s"]
+    del head["sweep_duration_cv"]
+    head["sweeps"] = [
+        {"duration_s": d} for d in
+        (1.855, 2.097, 1.855, 1.713, 1.648, 1.648, 1.552, 1.712, 1.391, 1.056)
+    ]
+
+    fid = prot.assess(session)
+    assert fid["observed"]["pace_derived_from_sweeps"] is True
+    assert fid["observed"]["mean_sweep_duration_s"] == 1.653, (
+        fid["observed"]["mean_sweep_duration_s"]
+    )
+    assert fid["observed"]["sweep_duration_cv"] == 0.1625, (
+        fid["observed"]["sweep_duration_cv"]
+    )
+    assert "pace_unknown" not in fid["advisory_flags"], fid["advisory_flags"]
+
+
+def test_pace_unknown_when_no_sweeps_either():
+    session = make_session()
+    del session["head_motion"]["mean_sweep_duration_s"]
+    fid = prot.assess(session)
+    assert "pace_unknown" in fid["advisory_flags"]
+    assert fid["observed"]["pace_derived_from_sweeps"] is False
+
+
+def test_aggregate_pace_field_wins_over_sweeps():
+    """When both exist, the aggregate is authoritative and nothing is 'derived'."""
+    session = make_session()
+    session["head_motion"]["sweeps"] = [{"duration_s": 9.9} for _ in range(10)]
+    fid = prot.assess(session)
+    assert fid["observed"]["pace_derived_from_sweeps"] is False
+    assert fid["observed"]["mean_sweep_duration_s"] == 1.2
+
+
+def test_fidelity_block_is_attached_to_the_summary():
+    out = sev.summarize(make_session(amplitude=76.0))
+    assert "protocol_fidelity" in out
+    assert out["protocol_fidelity"]["comparable_to_clinical_protocol"] is False
+    assert out["data_quality"]["protocol_advisory_flags"]
+
+
+def test_protocol_deviation_is_surfaced_in_notes():
+    out = sev.summarize(make_session(amplitude=76.0))
+    assert any("deviated from the standardized" in n for n in out["notes"]), out["notes"]
+    assert any("not comparable to published norms" in n for n in out["notes"])
+
+
+def test_protocol_deviation_does_not_block_scoring_by_default():
+    """Advisory by default: the objective signal still contributes."""
+    out = sev.summarize(make_session(symptom_score=8, fixation=31.6, amplitude=76.0))
+    assert out["status"] == sev.STATUS_SCORED, out["status"]
+    assert out["data_quality"]["objective_signal_usable"] is True
+    assert out["data_quality"]["gates_failed"] == []
+    assert out["composite_score"] == 75.36, out["composite_score"]
+
+
+def test_protocol_deviation_blocks_scoring_when_enforced():
+    """Flipping ENFORCE_AS_GATES promotes advisories to blocking gates."""
+    original = prot.ENFORCE_AS_GATES
+    prot.ENFORCE_AS_GATES = True
+    try:
+        out = sev.summarize(make_session(symptom_score=8, amplitude=76.0))
+        assert out["status"] == sev.STATUS_SYMPTOM_ONLY, out["status"]
+        assert out["data_quality"]["objective_signal_usable"] is False
+        assert any(g.startswith("protocol:") for g in out["data_quality"]["gates_failed"])
+    finally:
+        prot.ENFORCE_AS_GATES = original
+
+
+def test_blink_exclusion_count_reaches_the_summary():
+    out = sev.summarize(make_session(blinks_excluded=7))
+    assert out["data_quality"]["frames_excluded_blink"] == 7
 
 
 def main() -> int:

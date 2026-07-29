@@ -30,6 +30,10 @@ class FrameRecord:
     left_iris_offset: list | None   # [horizontal, vertical], eye-socket-normalized.
     right_iris_offset: list | None  # horizontal: + = toward subject's right, both eyes.
     landmark_confidence: float | None
+    # Vertical eye opening / eye width. Open eye ~0.25-0.40, collapses toward 0
+    # during a blink. Default None so callers predating this field still work.
+    left_eye_aperture: float | None = None
+    right_eye_aperture: float | None = None
 
     def to_dict(self):
         return asdict(self)
@@ -102,6 +106,42 @@ _LEFT_LATERAL_SIGN = -1.0
 _RIGHT_LATERAL_SIGN = 1.0
 
 
+def _eye_aperture(pts, outer_idx, inner_idx, top_idx, bottom_idx):
+    """Vertical eye opening as a fraction of eye width -- a blink detector.
+
+    An eye-aspect-ratio style measure. An open eye sits around 0.25-0.40; during a
+    blink it collapses toward 0. Normalising by eye width makes it invariant to
+    how far the subject sits from the camera.
+
+    This exists because _iris_offset() cannot distinguish a blink from a genuine
+    gaze deviation: with the lids shut the iris landmarks are unreliable and can
+    report a large spurious offset, which inflates residual_rms and therefore the
+    screening tier. Rejection happens in voms_session, using this value.
+    """
+    outer = pts[outer_idx][:2]
+    inner = pts[inner_idx][:2]
+    top = pts[top_idx][:2]
+    bottom = pts[bottom_idx][:2]
+
+    width = float(np.linalg.norm(outer - inner))
+    if width < 1e-6:
+        return None
+    return float(np.linalg.norm(top - bottom) / width)
+
+
+def both_eye_apertures(pts):
+    """Per-eye aperture ratios as (left, right); either may be None."""
+    left = _eye_aperture(
+        pts, LM.LEFT_EYE_OUTER, LM.LEFT_EYE_INNER,
+        LM.LEFT_EYE_TOP, LM.LEFT_EYE_BOTTOM,
+    )
+    right = _eye_aperture(
+        pts, LM.RIGHT_EYE_OUTER, LM.RIGHT_EYE_INNER,
+        LM.RIGHT_EYE_TOP, LM.RIGHT_EYE_BOTTOM,
+    )
+    return left, right
+
+
 def both_iris_offsets(pts):
     """Per-eye [horizontal, vertical] iris offsets in a shared sign convention.
 
@@ -163,6 +203,7 @@ class FaceTracker:
         left = right = None
         if has_iris:
             left, right = both_iris_offsets(pts)
+        left_aperture, right_aperture = both_eye_apertures(pts)
 
         # The Tasks API exposes no per-face score here, so we report presence-based
         # confidence: the fraction of landmarks that fall inside the frame bounds.
@@ -180,6 +221,8 @@ class FaceTracker:
             left_iris_offset=left,
             right_iris_offset=right,
             landmark_confidence=float(in_bounds),
+            left_eye_aperture=left_aperture,
+            right_eye_aperture=right_aperture,
         )
 
     def close(self):

@@ -76,7 +76,9 @@ def main(argv=None):
         # Don't recursively score our own output.
         if source.name.endswith(SCORED_SUFFIX):
             if not args.quiet:
-                print(f"skipping already-scored file: {source.name}", file=sys.stderr)
+                raw = source.name[:-len(SCORED_SUFFIX)] + ".json"
+                print(f"skipping already-scored file: {source.name} "
+                      f"(score {raw} instead)", file=sys.stderr)
             continue
         try:
             score_file(source, args.out_dir, args.stdout, args.quiet)

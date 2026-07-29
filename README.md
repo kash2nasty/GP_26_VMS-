@@ -88,11 +88,14 @@ session/voms_session.py    Session API + result assembly
 session/metrics.py         Peak detection, angular velocity, gaze stability math
 scoring/severity.py        Composite screening severity tiers
 scoring/exercises.py       Tier -> Cawthorne-Cooksey exercise mapping
+scoring/protocol.py        Protocol-fidelity assessment vs standardized VOMS
 scoring/pipeline.py        enrich_session() -- shared by both entrypoints
 run_session.py             CLI entrypoint (capture, optionally scored)
 score_session.py           CLI entrypoint (re-score an existing session JSON)
+check_yaw_ceiling.py       Measures the yaw angle where tracking degrades
 tests/test_gaze_sign.py    Regression tests for the iris sign convention
-tests/test_scoring.py      Tier, gate and exercise-mapping tests
+tests/test_blink_rejection.py  Blink detection and exclusion from the gaze fit
+tests/test_scoring.py      Tier, gate, fidelity and exercise-mapping tests
 models/                    face_landmarker.task
 sessions/                  Saved session JSON
 ```
@@ -103,8 +106,15 @@ Plain asserts, no pytest required:
 
 ```powershell
 python tests/test_gaze_sign.py
+python tests/test_blink_rejection.py
 python tests/test_scoring.py
 ```
+
+These suites are mutation-tested: each threshold, gate and safety rule has a corresponding
+deliberate break that must turn them red. Two tests were found decorative that way and
+rewritten — a blink test that checked a reported count rather than actual exclusion, and a tier
+test whose fixture used symptom score 0, which multiplies the symptom weight away. If you retune
+a threshold, re-run that check rather than trusting a green suite.
 
 ### Programmatic API
 
@@ -283,6 +293,61 @@ A caveat kept in the open: low `compensation_r2` is ambiguous. It can mean the t
 most interesting finding available. Gating on it is the conservative choice; the cost is that a
 genuine severe fixation failure reads as "not usable" rather than "pronounced". Separating the
 two needs a second modality this phase doesn't have.
+
+### Protocol fidelity
+
+The gaze metric is computed over whatever head motion actually occurred, which says nothing
+about whether that motion resembled the test the metric is meant to characterise. Every scored
+session therefore carries a `protocol_fidelity` block comparing observed motion against the
+standardized VOMS visual-motion parameters:
+
+| | reference | source |
+|---|---|---|
+| amplitude | 80° each side → **160° per sweep** | Mucha et al. 2014 |
+| pace | **50 bpm**, one beat per direction → 1.2 s per sweep | Mucha et al. 2014 |
+| reps | 5 | Mucha et al. 2014 |
+
+Deviations are reported as `advisory_flags` and surfaced in `notes`, with
+`comparable_to_clinical_protocol` stating plainly whether the session can be read against
+published norms. Flags cover amplitude, pace, within-session pace consistency
+(`sweep_duration_cv`), off-axis roll/pitch, and rep count.
+
+**Why advisory rather than blocking.** A single front-facing webcam may not be able to track
+±80° of yaw at all — the face approaches profile and the landmarker degrades. Until that ceiling
+is measured, hard-gating on protocol amplitude would mark every session unusable and discard the
+objective signal entirely. Flip `ENFORCE_AS_GATES = True` in `scoring/protocol.py` to promote
+them to blocking gates once the reachable amplitude is known.
+
+Note also that the Euler decomposition in `face_tracker.py` couples axes at large yaw, so part
+of a high `roll_range_deg` may be decomposition artifact rather than genuine head tilt — another
+reason these flag rather than block.
+
+Sessions captured before the aggregate pace fields existed still have `sweeps[]`, so pace is
+recovered from there and marked `pace_derived_from_sweeps: true`.
+
+### Measuring the yaw ceiling
+
+```powershell
+python check_yaw_ceiling.py --preview
+```
+
+Rotate progressively wider, holding briefly at each extreme. Reports tracking quality binned by
+|yaw| so you can see where detection falls away from ~1.0, and whether ±80° is reachable at all.
+If it isn't, protocol-faithful capture is impossible with this hardware and that belongs in the
+limitations list rather than being rediscovered later.
+
+### Blink rejection
+
+During a blink the iris landmarks are unreliable and can report a large spurious offset, which
+`_iris_offset()` cannot distinguish from a genuine gaze deviation. Left in, a blink inflates
+`residual_rms` → lowers `fixation_stability_score` → raises the tier. A ~20 s capture at a normal
+blink rate contains roughly 5–7 blinks, so this is the common case rather than an edge case.
+
+`face_tracker.py` reports a per-eye aperture ratio (vertical opening ÷ eye width; open ≈ 0.25–0.40,
+collapsing toward 0 when shut). Frames below `min_eye_aperture_ratio` (0.15, provisional) are
+excluded from the gaze fit only — head pose keeps every tracked frame, since a blink doesn't
+disturb head rotation. The count appears as `frames_excluded_blink`; `null` means the session
+predates the field, which is not the same as zero.
 
 ### Why higher severity gets fewer exercises
 

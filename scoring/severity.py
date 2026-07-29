@@ -46,7 +46,9 @@ WHY SYMPTOM SCORE IS WEIGHTED HIGHER
 """
 from __future__ import annotations
 
-SCORING_SCHEMA_VERSION = "0.1.0"
+from . import protocol
+
+SCORING_SCHEMA_VERSION = "0.2.0"
 
 # ---- tiers ---------------------------------------------------------------
 
@@ -162,7 +164,7 @@ def _apply_symptom_floor(tier: str, symptom_score, notes: list) -> str:
     return TIER_MILD
 
 
-def _assess_objective(session: dict, notes: list):
+def _assess_objective(session: dict, notes: list, fidelity: dict):
     """Decide whether the objective gaze signal is usable, and why not if not.
 
     Returns (instability_component or None, quality_dict).
@@ -193,20 +195,41 @@ def _assess_objective(session: dict, notes: list):
     elif reps < MIN_REPS_FOR_OBJECTIVE:
         gates_failed.append("too_few_completed_reps")
 
+    # Protocol deviations are advisory by default -- see scoring/protocol.py for
+    # why. Promoting them to gates is a one-constant change there.
+    advisory = list(fidelity.get("advisory_flags") or [])
+    if advisory and fidelity.get("enforced_as_gates"):
+        gates_failed.extend(f"protocol:{flag}" for flag in advisory)
+
     usable = not gates_failed
     quality = {
         "face_detection_rate": face_rate,
         "compensation_r2": r2,
         "fixation_stability_score": fixation,
         "completed_reps": int(reps) if reps is not None else None,
+        "frames_excluded_blink": (
+            int(_number(gaze, "frames_excluded_blink") or 0)
+            if _number(gaze, "frames_excluded_blink") is not None else None
+        ),
         "objective_signal_usable": usable,
         "gates_failed": gates_failed,
+        "protocol_advisory_flags": advisory,
         "thresholds_applied": {
             "min_face_detection_rate": MIN_FACE_DETECTION_RATE,
             "min_compensation_r2": MIN_COMPENSATION_R2,
             "min_completed_reps": MIN_REPS_FOR_OBJECTIVE,
         },
     }
+
+    if advisory:
+        notes.append(
+            "This session deviated from the standardized VOMS visual-motion "
+            f"protocol ({', '.join(advisory)}). The objective gaze metric is "
+            "computed over whatever motion occurred, so these numbers are not "
+            "comparable to published norms, and comparing them against another "
+            "session is only meaningful if that session was performed at a "
+            "similar amplitude and pace. See protocol_fidelity for detail."
+        )
 
     if not usable:
         notes.append(
@@ -238,7 +261,8 @@ def summarize(session: dict) -> dict:
         )
         symptom_score = None
 
-    instability_component, quality = _assess_objective(session, notes)
+    fidelity = protocol.assess(session)
+    instability_component, quality = _assess_objective(session, notes, fidelity)
     symptom_component = symptom_score * 10.0 if symptom_score is not None else None
 
     if symptom_component is not None and instability_component is not None:
@@ -292,6 +316,7 @@ def summarize(session: dict) -> dict:
             "instability_weight": INSTABILITY_WEIGHT,
         },
         "data_quality": quality,
+        "protocol_fidelity": fidelity,
         "method": {
             "composite_formula": COMPOSITE_FORMULA,
             "tier_thresholds": {

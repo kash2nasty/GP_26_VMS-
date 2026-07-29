@@ -30,6 +30,11 @@ class SessionConfig:
     motion_velocity_threshold_dps: float = 15.0
     smoothing_window: int = 5
     max_duration_s: float = 120.0
+    # Frames whose mean eye aperture falls below this are treated as blinks and
+    # excluded from the gaze fit. During a blink the iris landmarks are unreliable
+    # and can report a large spurious offset, which would inflate residual_rms.
+    # Open eyes sit around 0.25-0.40; this threshold is provisional.
+    min_eye_aperture_ratio: float = 0.15
 
 
 @dataclass
@@ -90,6 +95,24 @@ class VOMSSession:
             iris_vals.append(float(np.mean([o[0] for o in offsets])) if offsets else np.nan)
         iris_h = np.array(iris_vals, dtype=float)
 
+        # Blink rejection. Only affects the gaze fit -- a blink does not disturb
+        # head pose, so yaw/velocity keep every tracked frame.
+        aperture_vals = []
+        for r in tracked:
+            vals = [
+                a for a in (r.left_eye_aperture, r.right_eye_aperture)
+                if a is not None
+            ]
+            aperture_vals.append(float(np.mean(vals)) if vals else np.nan)
+        aperture = np.array(aperture_vals, dtype=float)
+
+        # NaN aperture (older records with no aperture field) compares False here,
+        # so an unknown aperture is never treated as a blink.
+        blink = aperture < self.config.min_eye_aperture_ratio
+        blinks_excluded = int(np.count_nonzero(blink & ~np.isnan(iris_h)))
+        iris_h = iris_h.copy()
+        iris_h[blink] = np.nan
+
         turning_points = metrics.find_turning_points(yaw, times_s, self.config.reversal_deg)
         sweeps = metrics.build_sweeps(
             turning_points, times_s, yaw, velocity, self.config.min_sweep_amplitude_deg
@@ -99,6 +122,8 @@ class VOMSSession:
             "yaw": yaw,
             "velocity": velocity,
             "iris_h": iris_h,
+            "aperture": aperture,
+            "blinks_excluded": blinks_excluded,
             "sweeps": sweeps,
             "tracked": tracked,
         }
@@ -180,6 +205,7 @@ class VOMSSession:
         peak_vels = (
             np.array([s["peak_angular_velocity_dps"] for s in sweeps]) if sweeps else np.array([])
         )
+        durations = np.array([s["duration_s"] for s in sweeps]) if sweeps else np.array([])
 
         result["head_motion"] = {
             "insufficient_data": not bool(sweeps),
@@ -199,6 +225,16 @@ class VOMSSession:
             "max_peak_angular_velocity_dps": (
                 round(float(np.max(peak_vels)), 2) if peak_vels.size else None
             ),
+            # Sweep pace. Needed to compare against the protocol's metronome
+            # cadence and to judge whether pace held steady within the session --
+            # a varying pace contaminates the gaze residual.
+            "mean_sweep_duration_s": (
+                round(float(np.mean(durations)), 3) if durations.size else None
+            ),
+            "sweep_duration_cv": (
+                round(float(np.std(durations) / np.mean(durations)), 4)
+                if durations.size and np.mean(durations) > 1e-9 else None
+            ),
             "pitch_range_deg": self._range_of("head_pitch", a["tracked"]),
             "roll_range_deg": self._range_of("head_roll", a["tracked"]),
             "sweeps": sweeps,
@@ -207,11 +243,17 @@ class VOMSSession:
         valid_iris = ~np.isnan(a["iris_h"])
         moving = (np.abs(a["velocity"]) > self.config.motion_velocity_threshold_dps) & valid_iris
         result["gaze_stability"] = metrics.gaze_stability(a["yaw"], a["iris_h"], moving)
+        result["gaze_stability"]["frames_excluded_blink"] = a["blinks_excluded"]
+        result["gaze_stability"]["min_eye_aperture_ratio"] = (
+            self.config.min_eye_aperture_ratio
+        )
         result["gaze_stability"]["metric_notes"] = (
             "compensation_slope/r2 describe how linearly the eyes counter-rotated "
             "against head yaw. residual_* captures eye motion not explained by that "
             "smooth compensation and is the primary instability signal. Degree values "
-            "use an uncalibrated anatomical constant and are approximate."
+            "use an uncalibrated anatomical constant and are approximate. Frames "
+            "where the eyes were closed are excluded from the fit; see "
+            "frames_excluded_blink."
         )
         return result
 
