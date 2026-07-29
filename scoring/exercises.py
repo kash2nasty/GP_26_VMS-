@@ -66,7 +66,7 @@ TYPICAL_COURSE = (
 )
 
 SAFETY_NOTE = (
-    "Mild, short-lived symptoms during these exercises are expected -- that "
+    "Mild, short-lived symptoms during these exercises are expected, because that "
     "controlled provocation is how habituation is thought to work. Stop and seek "
     "advice if symptoms are severe, do not settle after finishing, or worsen over "
     "several days. Have someone nearby for anything done with the eyes closed or "
@@ -77,8 +77,8 @@ DISCLAIMER = (
     "These are general published exercises shown for information only. They are "
     "not personalized medical advice, not a program tailored to this individual, "
     "and they do not identify, confirm, or rule out any medical condition. "
-    "Consult a qualified clinician -- a physician, physiotherapist, or "
-    "audiologist -- before beginning any exercise program, particularly if there "
+    "Consult a qualified clinician (a physician, physiotherapist, or "
+    "audiologist) before beginning any exercise program, particularly if there "
     "is any history of neck injury, fainting, or falls."
 )
 
@@ -201,8 +201,8 @@ TIER_PLANS = {
             "symptoms."
         ),
         "progression": (
-            "Sustained head rotation -- the movement this subtest uses to provoke "
-            "symptoms -- is intentionally left out of this starting set. Adding it, "
+            "Sustained head rotation, the movement this subtest uses to provoke "
+            "symptoms, is intentionally left out of this starting set. Adding it, "
             "and any standing or walking work, should follow a clinician's review "
             "rather than a fixed timetable."
         ),
@@ -213,7 +213,7 @@ TIER_PLANS = {
              "head rotation that provoked symptoms during the test."),
             ("thumb_focus_near_far",
              "Trains the eyes to hold a target independently of head movement, "
-             "which is the same fixation demand the subtest measured -- but here "
+             "which is the same fixation demand the subtest measured, but here "
              "with the head kept still."),
             ("shoulder_shrugs_and_circles",
              "Included to release neck and shoulder guarding, which is common when "
@@ -301,7 +301,7 @@ TIER_PLANS = {
              "Adds locomotion, where balance relies on vestibular input more than "
              "it does when standing still."),
             ("walk_with_head_turns",
-             "Combines head rotation with walking -- the closest everyday "
+             "Combines head rotation with walking, the closest everyday "
              "equivalent of the demand the subtest measures."),
             ("slope_or_stairs",
              "Adds a changing surface and visual scene, near the dynamic end of "
@@ -339,7 +339,7 @@ def recommend(severity_tier: str | None, status: str | None = None) -> dict:
         )
         if status == STATUS_INSUFFICIENT:
             reason += (
-                " The session data was insufficient -- re-run the session and "
+                " The session data was insufficient, so re-run the session and "
                 "score it again."
             )
         elif severity_tier is not None:

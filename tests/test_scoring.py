@@ -422,6 +422,38 @@ def test_new_blocks_avoid_clinical_certainty_language():
                     assert word not in prose, f"{path}: {word!r} in {text!r}"
 
 
+def test_no_em_dashes_in_user_facing_text():
+    """House style: no em dashes, en dashes, or ASCII double hyphens in copy.
+
+    These strings are authored in Python and rendered verbatim by the web UI, so
+    this is the only place the convention can actually be enforced. Comments and
+    docstrings are exempt by construction, since this walks the built output
+    rather than the source.
+    """
+    banned = {
+        "em dash": "—",
+        "en dash": "–",
+        "double hyphen": "--",
+    }
+    for tier_case in (6, None, 0):
+        enriched = enrich_session(make_session(symptom_score=tier_case))
+        for block_name in ("screening_summary", "recommended_exercises"):
+            for path, text in _strings(enriched[block_name], block_name):
+                for label, needle in banned.items():
+                    assert needle not in text, f"{label} in {path}: {text!r}"
+
+
+def test_no_em_dashes_in_insufficient_data_text():
+    """The insufficient-data path has its own copy, so it needs its own check."""
+    enriched = enrich_session(make_session(
+        symptom_score=None, gaze_shape="absent_keys", head_shape="absent_keys",
+    ))
+    for block_name in ("screening_summary", "recommended_exercises"):
+        for path, text in _strings(enriched[block_name], block_name):
+            for needle in ("—", "–", "--"):
+                assert needle not in text, f"{needle!r} in {path}: {text!r}"
+
+
 def test_exercise_blocks_cite_the_protocol():
     rec = ex.recommend(sev.TIER_MODERATE)
     assert rec["protocol"] == ex.PROTOCOL_NAME

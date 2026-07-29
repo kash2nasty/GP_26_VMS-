@@ -235,9 +235,9 @@ def _assess_objective(session: dict, notes: list, fidelity: dict):
         notes.append(
             "The objective gaze signal was not used because it did not pass the "
             f"data-quality gates ({', '.join(gates_failed)}). A low "
-            "compensation_r2 in particular is ambiguous -- it can mean the "
+            "compensation_r2 in particular is ambiguous, because it can mean the "
             "tracker struggled or that the patient genuinely did not hold "
-            "fixation -- so it is reported as unusable rather than scored."
+            "fixation, so it is reported as unusable rather than scored."
         )
         return None, quality
 
@@ -283,7 +283,7 @@ def summarize(session: dict) -> dict:
         composite = instability_component
         notes.append(
             "No self-reported symptom score was provided, so the tier rests "
-            "entirely on the objective gaze signal -- which is uncalibrated and "
+            "entirely on the objective gaze signal, which is uncalibrated and "
             "the weaker of the two inputs. Treat this tier as provisional."
         )
     else:

@@ -11,18 +11,16 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-import time
-from datetime import datetime, timezone
 from pathlib import Path
 
 import cv2
 
 from camera.capture import FrameSource
-from scoring.pipeline import describe, enrich_session
+from scoring.pipeline import describe
+from session_io import SESSIONS_DIR, save_session
 from session.voms_session import SessionConfig, VOMSSession
 from tracking.face_tracker import DEFAULT_MODEL_PATH, FaceTracker
 
-SESSIONS_DIR = Path("sessions")
 
 
 def parse_args(argv=None):
@@ -151,31 +149,15 @@ def main(argv=None):
 
     result = session.end_session(symptom_score=score)
 
-    out_dir = Path(args.out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    # Saving lives in session_io so the browser capture path (api/capture.py)
+    # cannot produce differently-named or differently-shaped files.
+    saved = save_session(result, out_dir=args.out_dir, score=args.score)
 
-    # The raw capture is always written, even with --score. It is the expensive
-    # artifact, and re-scoring it later with updated thresholds is a first-class
-    # use case -- score_session.py skips .scored.json files, so a scored-only
-    # output would have been a dead end.
-    raw_path = out_dir / f"session_{stamp}.json"
-    raw_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
-    written = [raw_path]
-
-    # Optional scoring step. Uses the same enrich_session() as score_session.py so
-    # a live run and a later re-score of the saved file cannot disagree.
-    if args.score:
-        result = enrich_session(result)
-        scored_path = out_dir / f"session_{stamp}.scored.json"
-        scored_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
-        written.append(scored_path)
-
-    print(json.dumps(result, indent=2))
+    print(json.dumps(saved.result, indent=2))
     if not args.quiet:
         if args.score:
-            print(f"\n{describe(result)}", file=sys.stderr)
-        for path in written:
+            print(f"\n{describe(saved.result)}", file=sys.stderr)
+        for path in saved.written:
             print(f"Saved to {path}", file=sys.stderr)
     return 0
 

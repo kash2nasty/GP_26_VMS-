@@ -90,12 +90,19 @@ scoring/severity.py        Composite screening severity tiers
 scoring/exercises.py       Tier -> Cawthorne-Cooksey exercise mapping
 scoring/protocol.py        Protocol-fidelity assessment vs standardized VOMS
 scoring/pipeline.py        enrich_session() -- shared by both entrypoints
+api/repository.py          Session discovery/loading for the API (no FastAPI import)
+api/main.py                FastAPI read-only endpoints over sessions/
+api/capture.py             WebSocket endpoint for browser-driven capture
+session_io.py              Session file naming/writing, shared by CLI and API
+web/                       Next.js dashboard (see "Results dashboard" below)
 run_session.py             CLI entrypoint (capture, optionally scored)
 score_session.py           CLI entrypoint (re-score an existing session JSON)
 check_yaw_ceiling.py       Measures the yaw angle where tracking degrades
 tests/test_gaze_sign.py    Regression tests for the iris sign convention
 tests/test_blink_rejection.py  Blink detection and exclusion from the gaze fit
 tests/test_scoring.py      Tier, gate, fidelity and exercise-mapping tests
+tests/test_api.py          API loading, edge shapes, and the no-mediapipe constraint
+tests/test_capture.py      Capture socket end-to-end through real MediaPipe
 models/                    face_landmarker.task
 sessions/                  Saved session JSON
 ```
@@ -108,6 +115,8 @@ Plain asserts, no pytest required:
 python tests/test_gaze_sign.py
 python tests/test_blink_rejection.py
 python tests/test_scoring.py
+python tests/test_api.py
+python tests/test_capture.py     # slower: real MediaPipe over the capture socket
 ```
 
 These suites are mutation-tested: each threshold, gate and safety rule has a corresponding
@@ -363,10 +372,171 @@ with descriptions and frequency norms drawn from patient-facing renderings of it
 lives in one dict in `scoring/exercises.py` with the tier mapping beside it, so it is reviewable
 and editable without touching logic.
 
-## Out of scope for this phase
+---
 
-No UI, no appointment booking, no normative/validated thresholds, and no clinical
-interpretation — screening signal and general exercise suggestions only.
+## Results dashboard (API + web frontend)
+
+A read-only dashboard for browsing past sessions. Two processes: a FastAPI backend that
+reads `sessions/`, and a Next.js frontend that renders it.
+
+### Running it
+
+You need **two terminals**, both from the project root.
+
+**Terminal 1 — the API:**
+
+```powershell
+.venv\Scripts\activate
+uvicorn api.main:app --reload --port 8000
+```
+
+Check it with http://127.0.0.1:8000/docs (an interactive view of the endpoints, generated
+automatically by FastAPI).
+
+**Terminal 2 — the frontend:**
+
+```powershell
+cd web
+npm run dev
+```
+
+Then open **http://localhost:3000**. If the API isn't running, the page says so and shows
+the command to start it rather than failing with a blank screen.
+
+### Architecture
+
+```
+api/repository.py    Finds and loads session JSON. No FastAPI import, so it unit-tests directly.
+api/main.py          FastAPI app: GET /sessions, GET /sessions/{id}, GET /health.
+api/capture.py       WebSocket capture from the browser (see below).
+session_io.py        Where a session gets written. Shared by the CLI and the API.
+web/                 Next.js 16 + Tailwind 4 + shadcn/ui (dashboard-01 block).
+```
+
+The API **never touches the camera stack.** `session/voms_session.py` looks like the natural
+place to import the canonical disclaimer from, but it pulls in `tracking/face_tracker.py` →
+`mediapipe`, dragging the whole capture stack into the web process. Disclaimers come from
+`scoring/` (import-clean) and from the session JSON instead. `tests/test_api.py` enforces this
+in a subprocess — if someone adds a convenient import, that test fails.
+
+### What the API does with the three on-disk shapes
+
+`sessions/` is not uniform, because `run_session.py` changed over time. A *session* is the
+logical unit keyed by timestamp, not a file:
+
+| On disk | Served as | `scoring_source` |
+|---|---|---|
+| raw + `.scored.json` pair | the stored score | `file` |
+| `.scored.json` only (older `--score` run) | the stored score | `file` |
+| raw only (no `--score`) | scored in memory on read | `computed` |
+
+Stale scores are served **as-is**, not re-scored. A file written by scoring schema 0.1.0 has no
+`protocol_fidelity`; re-scoring it on read would make the API disagree with the file on disk,
+and this phase is read-only. The UI shows those as "Not assessed" — distinct from "off
+protocol", because a check that never ran is not a check that failed.
+
+A malformed file is reported in an `unreadable` list rather than taking down the whole page or
+silently vanishing.
+
+### Disclaimers are served, not hardcoded
+
+Every response carrying results includes a `disclaimers` block, and the frontend renders that
+text rather than its own copy. The Python layer deliberately bakes disclaimers into its output
+schema so a later UI cannot drop them; duplicating the wording in TypeScript would defeat that
+by letting the two drift. On the detail page the exercise disclaimer and safety note render
+**above** the exercises, since that's the one screen telling someone to do physical activity.
+
+### Running the test from the browser
+
+**Sessions → New session**, or http://localhost:3000/capture.
+
+The browser is a camera and a display. It grabs JPEG frames from the webcam, streams them to
+Python over a WebSocket, and renders the progress Python sends back. **No analysis happens in
+JavaScript.** Every number still comes from `tracking/`, `session/` and `scoring/` — the same
+code the CLI runs.
+
+That was the central decision, and it was not about convenience. Porting the metrics to
+TypeScript would mean a second implementation of the iris sign convention, blink rejection,
+sweep detection, the gaze fit and the scoring thresholds — all covered by a Python test suite
+that exists *because* a sign-convention bug in exactly that math silently destroyed the core
+signal once already. Two copies would reintroduce that class of bug with nothing to catch the
+drift.
+
+**Frames, not a video upload.** MediaRecorder produces WebM/VP8-9, and OpenCV's Windows build
+can't be relied on to decode it. JPEG frames go through `cv2.imdecode`, which is unconditionally
+supported, and they allow live rep counting *during* the test rather than only after.
+
+**MediaPipe is imported lazily**, inside the capture handler. `import api.main` still pulls in
+zero camera-stack modules even with the capture router mounted, so the read-only browsing
+endpoints keep their fast startup — and `tests/test_api.py` still enforces that unchanged.
+
+**The pacing metronome is audible, not just visual.** The patient is meant to be staring at
+their own thumb, so an on-screen-only cue would be invisible exactly when it matters. High tone
+means turn left, low tone right, at the protocol's 50 bpm. This is a correctness feature: pace is
+what this project found it was getting wrong, and uncontrolled rotation speed is what makes
+sessions incomparable. The panel also shows widest-turn-so-far against the 80° target.
+
+**The preview is mirrored; the captured frames are not.** Mirroring the pixels sent to Python
+would invert head yaw and swap which eye is which — the same left/right confusion that caused
+the original bug. The mirror is a CSS transform on the `<video>` element only; the canvas draws
+from the unmirrored source.
+
+**Nothing is written until you choose to save.** Closing the tab, disconnecting, or pressing
+Discard writes no file. Saving a session the user walked away from would litter the dashboard
+with records nobody chose to keep. A capture that *is* saved writes both the raw and scored
+files, exactly like `run_session.py --score`, via the shared `session_io.save_session`.
+
+Frames are timestamped on arrival by the server's monotonic clock rather than by the browser.
+Over loopback that difference is sub-millisecond, and the metrics already use real timestamps
+rather than assuming a fixed rate — but it does mean a stalled tab reads as slow head motion
+rather than as dropped frames.
+
+### Notes on the frontend
+
+Built from the shadcn `dashboard-01` block via the CLI, with deliberate departures:
+
+- **The block's `data-table.tsx` was replaced.** Its 874 lines implement drag-to-reorder and
+  row-selection over a `{header, reviewer, target}` document schema. On immutable capture
+  records, a drag handle is an affordance the app can't honour. The replacement keeps the same
+  TanStack Table + shadcn primitives (so it matches visually) and keeps column sorting, which
+  is genuinely useful and server-free. Tier sorting uses clinical order, not alphabetical.
+- **No cross-session trend chart.** The block's chart was demo data. A trend of the composite
+  score would contradict this project's own finding that the objective half is uncalibrated and
+  sensitive to uncontrolled rotation speed — it would look like a measurement while being an
+  artifact of inconsistent technique. Symptom score alone would be a defensible future addition.
+- **Sidebar and user menu stripped.** There's no authentication in this phase, so an avatar
+  would imply a login that doesn't exist, and placeholder nav links teach that things are
+  clickable when they aren't.
+- **Tier colours are not a red/green scale.** These are screening bands, not pass/fail; a green
+  "minimal" badge would read as an all-clear this tool cannot support.
+- **Theme is a light-blue tint, not a wash.** Chroma is kept to 0.01–0.04 on surfaces so large
+  areas stay readable and don't compete with the amber/rose status badges, which carry actual
+  meaning. Headings are Source Serif 4 against Inter body copy. Contrast was measured rather
+  than eyeballed: light `muted-foreground` (the smallest text on the page) is 5.95:1, dark is
+  7.64:1, both past WCAG AA.
+
+Two version-specific gotchas worth knowing if you edit this code:
+
+- **Next.js 16 removed synchronous `params`.** Dynamic pages must `await params`. See
+  `web/AGENTS.md` — that version has breaking changes, and the bundled docs in
+  `web/node_modules/next/dist/docs/` are the authority.
+- **This shadcn build is on Base UI, not Radix.** Composition uses `render={<Link/>}`, not
+  `asChild`. Using `asChild` typechecks as an error rather than failing at runtime.
+
+`npm audit` reports 12 high-severity advisories, all in build tooling (eslint → minimatch,
+postcss, sharp) reachable only at lint/build time, not by this read-only local dashboard. No
+semver-compatible fix exists; `npm audit fix --force` would break major versions for no real
+gain here.
+
+## Out of scope
+
+No accounts or authentication, no editing or deleting sessions from the UI, no appointment
+booking, no normative/validated thresholds, and no clinical interpretation — screening signal
+and general exercise suggestions only.
+
+Browser capture is intentionally *not* independent of Python: the frontend cannot score a
+session on its own, and is useless without the local API running. That is the point — one
+implementation of the metrics, not two.
 
 ## Known limitations
 
