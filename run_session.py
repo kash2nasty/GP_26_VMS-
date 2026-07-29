@@ -4,6 +4,7 @@ Examples:
     python run_session.py
     python run_session.py --reps 5 --preview
     python run_session.py --source path/to/clip.mp4 --symptom-score 3
+    python run_session.py --score          # also append screening + exercise blocks
 """
 from __future__ import annotations
 
@@ -17,6 +18,7 @@ from pathlib import Path
 import cv2
 
 from camera.capture import FrameSource
+from scoring.pipeline import describe, enrich_session
 from session.voms_session import SessionConfig, VOMSSession
 from tracking.face_tracker import DEFAULT_MODEL_PATH, FaceTracker
 
@@ -42,6 +44,9 @@ def parse_args(argv=None):
                    help="Do not prompt for a symptom score; record it as null.")
     p.add_argument("--out-dir", default=str(SESSIONS_DIR),
                    help="Directory for saved session JSON. Default: sessions/")
+    p.add_argument("--score", action="store_true",
+                   help="Append screening_summary and recommended_exercises blocks "
+                        "to the output (same logic as score_session.py).")
     p.add_argument("--quiet", action="store_true", help="Suppress progress output.")
     return p.parse_args(argv)
 
@@ -146,15 +151,23 @@ def main(argv=None):
 
     result = session.end_session(symptom_score=score)
 
+    # Optional scoring step. Uses the same enrich_session() as score_session.py so
+    # a live run and a later re-score of the saved file cannot disagree.
+    if args.score:
+        result = enrich_session(result)
+
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    out_path = out_dir / f"session_{stamp}.json"
+    suffix = ".scored.json" if args.score else ".json"
+    out_path = out_dir / f"session_{stamp}{suffix}"
     out_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
 
     print(json.dumps(result, indent=2))
     if not args.quiet:
-        print(f"\nSaved to {out_path}", file=sys.stderr)
+        if args.score:
+            print(f"\n{describe(result)}", file=sys.stderr)
+        print(f"Saved to {out_path}", file=sys.stderr)
     return 0
 
 

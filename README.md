@@ -86,8 +86,13 @@ tracking/face_tracker.py   MediaPipe Face Landmarker -> per-frame FrameRecord
 tracking/landmarks.py      Landmark index constants (iris, eye corners)
 session/voms_session.py    Session API + result assembly
 session/metrics.py         Peak detection, angular velocity, gaze stability math
-run_session.py             CLI entrypoint
+scoring/severity.py        Composite screening severity tiers
+scoring/exercises.py       Tier -> Cawthorne-Cooksey exercise mapping
+scoring/pipeline.py        enrich_session() -- shared by both entrypoints
+run_session.py             CLI entrypoint (capture, optionally scored)
+score_session.py           CLI entrypoint (re-score an existing session JSON)
 tests/test_gaze_sign.py    Regression tests for the iris sign convention
+tests/test_scoring.py      Tier, gate and exercise-mapping tests
 models/                    face_landmarker.task
 sessions/                  Saved session JSON
 ```
@@ -98,6 +103,7 @@ Plain asserts, no pytest required:
 
 ```powershell
 python tests/test_gaze_sign.py
+python tests/test_scoring.py
 ```
 
 ### Programmatic API
@@ -224,10 +230,78 @@ The intended future comparison is **`residual_rms_offset_units` against the self
 score**, across sessions and against normative data. No thresholds are hardcoded, because
 establishing them is a clinical validation exercise, not a coding one.
 
+---
+
+## Screening severity and exercise suggestions
+
+A second layer turns a captured session into a coarse severity tier plus general published
+exercise suggestions. It is a **screening** layer: it does not identify, confirm, or rule out
+any condition, and every block it emits carries its own disclaimer and safety note.
+
+```powershell
+python score_session.py sessions/session_20260729T024816Z.json   # re-score an existing file
+python score_session.py sessions/*.json                          # batch
+python score_session.py sessions/s.json --stdout                 # print, don't write
+python run_session.py --score                                    # capture and score in one go
+```
+
+`score_session.py` writes `<name>.scored.json` beside the original and never modifies the
+input, so re-scoring old captures with updated thresholds is safe. Both entrypoints call the
+same `scoring.pipeline.enrich_session()`, so a live run and a later re-score cannot disagree.
+
+### The severity formula
+
+```
+symptom_component     = symptom_score * 10              -> 0..100
+instability_component = 100 - fixation_stability_score   -> 0..100
+composite             = 0.60 * symptom_component + 0.40 * instability_component
+
+composite <  20 -> minimal     40 <= c < 65 -> moderate
+20 <= c   <  40 -> mild        65 <= c      -> pronounced
+```
+
+**Floor rule:** a symptom score ≥ 2 is never reported as `minimal`. Mucha et al. (2014)
+established ≥ 2 on any VOMS item as a positive screening cut-off, so `minimal` there would
+contradict the published anchor.
+
+**Calibration status — read before trusting the numbers.** The symptom cut-off is published.
+Nothing on the objective side is: `fixation_stability_score` is bespoke to this tool and built
+on an arbitrary internal anchor, and degree values use an uncalibrated constant. The 0.60/0.40
+split reflects that asymmetry in evidence — the validated signal carries more weight — but the
+weights are a judgement call, not a fitted result. The formula is emitted in the output's
+`method` block, generated from the constants so it cannot drift from what was applied.
+
+### Data-quality gates
+
+The objective signal is only used if `face_detection_rate ≥ 0.75`, `compensation_r2 ≥ 0.50`,
+and `completed_reps ≥ 3`. Failing any gate drops to `status: symptom_only` with the failed
+gates listed — never a silent fallback. If neither input is usable, `status:
+insufficient_data`, `severity_tier: null`, and **no exercises are suggested at all**.
+
+A caveat kept in the open: low `compensation_r2` is ambiguous. It can mean the tracker failed
+*or* that the patient genuinely didn't fixate — which would be real signal, and arguably the
+most interesting finding available. Gating on it is the conservative choice; the cost is that a
+genuine severe fixation failure reads as "not usable" rather than "pronounced". Separating the
+two needs a second modality this phase doesn't have.
+
+### Why higher severity gets fewer exercises
+
+This inverts the naive mapping, deliberately. Habituation works by repeated exposure at a
+tolerable intensity, so a more-provoked result yields a **shorter, gentler** starting set
+(seated, eyes open, brief) while a less-provoked result starts nearer the dynamic end of the
+protocol. At `pronounced`, sustained head rotation — the movement the subtest uses to provoke
+symptoms — is withheld from the starting set pending clinician review. A tier→difficulty
+mapping would have handed the most symptomatic person the most aggressive protocol.
+
+Exercises come from the published Cawthorne-Cooksey protocol (Cawthorne 1946; Cooksey 1946),
+with descriptions and frequency norms drawn from patient-facing renderings of it. The catalogue
+lives in one dict in `scoring/exercises.py` with the tier mapping beside it, so it is reviewable
+and editable without touching logic.
+
 ## Out of scope for this phase
 
-No UI, no appointment booking, no diagnosis or exercise-recommendation logic, no normative
-thresholds.
+No UI, no appointment booking, no normative/validated thresholds, and no clinical
+interpretation — screening signal and general exercise suggestions only.
 
 ## Known limitations
 
