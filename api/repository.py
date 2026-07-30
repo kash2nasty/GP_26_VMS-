@@ -18,6 +18,14 @@ WHY STALE SCORES ARE SERVED AS-IS
     file on disk, and this phase is read-only. They are served unchanged with
     `scoring_schema_version` exposed, so the UI can mark them as needing a
     re-score rather than silently presenting different numbers.
+
+THE ONE EXCEPTION: THE INDICATIONS PANEL
+    Every scored file on disk predates scoring/indications.py, so none of them
+    carries a panel. The rule above exists to stop the API contradicting a stored
+    value, and there is no stored value here to contradict, so the panel is
+    computed on read when it is missing. `indications_source` says which happened.
+    The alternative was showing an empty panel for every existing session, which
+    would read as "nothing was found" rather than "nothing was looked for".
 """
 from __future__ import annotations
 
@@ -26,6 +34,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
+from scoring.indications import assess as assess_indications
 from scoring.pipeline import enrich_session
 
 SCORED_SUFFIX = ".scored.json"
@@ -70,6 +79,7 @@ class LoadResult:
     scoring_source: str          # "file" | "computed"
     scoring_schema_version: str | None
     session: dict = field(repr=False)
+    indications_source: str = "file"   # "file" | "computed"
 
 
 def split_filename(name: str):
@@ -169,6 +179,15 @@ class SessionRepository:
             data = enrich_session(data)
             source = "computed"
 
+        # Additive, never overwriting: a stored panel is served exactly as written.
+        indications_source = "file"
+        if not isinstance(data.get("screening_indications"), dict):
+            data = dict(data)
+            data["screening_indications"] = assess_indications(
+                data, data.get("screening_summary") or {}
+            )
+            indications_source = "computed"
+
         summary = data.get("screening_summary") or {}
         return LoadResult(
             session_id=session_id,
@@ -176,6 +195,7 @@ class SessionRepository:
             scoring_source=source,
             scoring_schema_version=_get(summary, "scoring_schema_version"),
             session=data,
+            indications_source=indications_source,
         )
 
     # ---- deletion --------------------------------------------------------
@@ -229,6 +249,7 @@ class SessionRepository:
         symptoms = _get(s, "self_reported_symptoms") or {}
         tracking = _get(s, "tracking_quality") or {}
         head = _get(s, "head_motion") or {}
+        panel = _get(s, "screening_indications") or {}
 
         return {
             "id": result.session_id,
@@ -250,6 +271,19 @@ class SessionRepository:
             ),
             "scoring_source": result.scoring_source,
             "scoring_schema_version": result.scoring_schema_version,
+            # The wider panel, flattened enough for the list view to show which
+            # sessions have something on them without loading every panel.
+            #
+            # The list uses the SECONDARY set: the primary check restates the
+            # severity tier, which the list already shows in its own column, so
+            # counting it there made every non-minimal session read as "1 flagged"
+            # and printed the tier twice under two different headings.
+            "indications_indicated": _get(panel, "secondary_indicated") or [],
+            "indications_checks_run": _get(panel, "secondary_checks_run"),
+            "indications_all_indicated": _get(panel, "indicated") or [],
+            "indications_not_assessable": len(_get(panel, "not_assessable") or []),
+            "indications_highest_urgency": _get(panel, "highest_urgency"),
+            "indications_source": result.indications_source,
         }
 
     def list_summaries(self) -> tuple[list[dict], list[dict]]:

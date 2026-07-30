@@ -35,7 +35,6 @@ import {
 } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
-import { Badge } from "@/components/ui/badge"
 import {
   Card,
   CardContent,
@@ -101,6 +100,13 @@ export function CaptureClient({
   const audioRef = React.useRef<AudioContext | null>(null)
   const soundOnRef = React.useRef(true)
   const finishedRef = React.useRef(false)
+  /**
+   * True once the capture has reached any terminal state: saved, aborted, or
+   * already reporting an error. The close handler checks it so a socket closing as
+   * a CONSEQUENCE of one of those does not overwrite the specific message with a
+   * generic connection error.
+   */
+  const settledRef = React.useRef(false)
 
   React.useEffect(() => {
     soundOnRef.current = soundOn
@@ -198,6 +204,7 @@ export function CaptureClient({
     setError(null)
     setPhase("starting")
     finishedRef.current = false
+    settledRef.current = false
 
     let stream: MediaStream
     try {
@@ -244,6 +251,7 @@ export function CaptureClient({
     }
 
     socket.onerror = () => {
+      settledRef.current = true
       setError(
         "Lost the connection to the screening API. Check that it is running on " +
           `${API_BASE} and try again.`
@@ -253,9 +261,21 @@ export function CaptureClient({
     }
 
     socket.onclose = () => {
-      if (!finishedRef.current) {
+      if (finishedRef.current || settledRef.current) {
         stopEverything()
+        return
       }
+      // A socket dying mid-capture used to tear the camera down silently and leave
+      // the UI on "Recording" with a frozen frame counter, so the only symptom of a
+      // crashed backend was that nothing happened. Say so instead.
+      settledRef.current = true
+      stopEverything()
+      setError(
+        "The connection to the screening API closed before this session finished, " +
+          "so nothing was written to disk. Check that the Python service is still " +
+          "running, then start again."
+      )
+      setPhase("error")
     }
 
     socket.onmessage = (event) => {
@@ -267,6 +287,7 @@ export function CaptureClient({
       }
 
       if (message.type === "error") {
+        settledRef.current = true
         setError(String(message.detail ?? "Capture failed."))
         setPhase("error")
         stopEverything()
@@ -323,6 +344,7 @@ export function CaptureClient({
     (score: number | null) => {
       const socket = socketRef.current
       if (!socket || socket.readyState !== WebSocket.OPEN) {
+        settledRef.current = true
         setError(
           "The connection closed before this session could be saved. The capture " +
             "was not written to disk."
@@ -337,6 +359,7 @@ export function CaptureClient({
   )
 
   const discard = React.useCallback(() => {
+    settledRef.current = true
     const socket = socketRef.current
     if (socket && socket.readyState === WebSocket.OPEN) {
       socket.send(JSON.stringify({ type: "abort" }))
@@ -359,7 +382,7 @@ export function CaptureClient({
       ) : null}
 
       {phase === "error" ? (
-        <Card className="border-destructive/40">
+        <Card className="ring-destructive/40">
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
               <TriangleAlertIcon className="size-4" />
@@ -474,7 +497,7 @@ function IntroCard({
     <div className="space-y-4">
       {/* This test deliberately provokes symptoms. The caution belongs before the
           start button, not after the fact. */}
-      <Card className="border-amber-300 bg-amber-50 dark:border-amber-900 dark:bg-amber-950/40">
+      <Card className="bg-amber-50 ring-amber-300 dark:bg-amber-950/40 dark:ring-amber-900">
         <CardHeader>
           <CardTitle className="flex items-center gap-2 text-base">
             <TriangleAlertIcon className="size-4" />
@@ -495,9 +518,9 @@ function IntroCard({
         </CardHeader>
       </Card>
 
-      <Card>
+      <Card className="hero-wash">
         <CardHeader>
-          <CardTitle>How to perform the test</CardTitle>
+          <CardTitle className="text-lg">How to perform the test</CardTitle>
           <CardDescription>
             The standardized protocol: {TARGET_AMPLITUDE_DEG}° to each side at{" "}
             {CADENCE_BPM} beats per minute, {targetReps} repetitions.
@@ -521,11 +544,20 @@ function IntroCard({
             ))}
           </ol>
           <Separator />
-          <p className="text-muted-foreground">
-            Turn your volume up so you can hear the pacing tones, because you
-            should be looking at your thumb rather than at this screen. Rotation
-            speed changes the result, so keeping to the beat is what makes one
-            session comparable to another.
+          <p className="max-w-[68ch] text-muted-foreground">
+            Turn your volume up so you can hear the pacing tones, because you should
+            be looking at your thumb rather than at this screen. Rotation speed
+            changes the result, so keeping to the beat is what makes one session
+            comparable to another.
+          </p>
+          {/* The wider signal set needs a few seconds of a squarely presented face
+              to measure anything about it, and a test made entirely of turning the
+              head does not otherwise provide them. */}
+          <p className="max-w-[68ch] text-muted-foreground">
+            Before the sweeps begin, face the camera squarely for a few seconds. The
+            eyelid, eye alignment and facial symmetry checks can only be measured
+            while the head is near frontal, and without those frames they report as
+            not assessable.
           </p>
           <Button onClick={onBegin} className="w-full sm:w-auto">
             <CameraIcon className="size-4" />

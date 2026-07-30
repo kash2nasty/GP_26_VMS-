@@ -102,6 +102,7 @@ def get_session(session_id: str):
         "captured_at": result.captured_at,
         "scoring_source": result.scoring_source,
         "scoring_schema_version": result.scoring_schema_version,
+        "indications_source": result.indications_source,
         "summary": repository.summarize(result),
         "session": result.session,
         "disclaimers": disclaimers(),

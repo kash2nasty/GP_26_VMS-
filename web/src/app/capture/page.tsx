@@ -30,6 +30,7 @@ export default async function CapturePage() {
     <DashboardShell title="New session" backHref="/sessions" backLabel="Sessions">
       <SectionHeader
         as="h1"
+        eyebrow="New capture"
         title="Record a session"
         description="Your browser captures the video and sends frames to the local Python service, which does all of the tracking and scoring. Nothing leaves this machine."
       />

@@ -38,14 +38,12 @@ export function ExerciseList({
   return (
     <section className="space-y-4" aria-labelledby="exercises-heading">
       <div className="space-y-1">
-        <h2 id="exercises-heading" className="text-xl font-semibold tracking-tight">
+        {recommendations?.protocol ? (
+          <p className="eyebrow">From the {recommendations.protocol}</p>
+        ) : null}
+        <h2 id="exercises-heading" className="text-lg leading-snug font-semibold">
           Suggested exercises
         </h2>
-        {recommendations?.protocol ? (
-          <p className="text-sm text-muted-foreground">
-            From the {recommendations.protocol}
-          </p>
-        ) : null}
       </div>
 
       <ExerciseDisclaimer
@@ -54,7 +52,7 @@ export function ExerciseList({
       />
 
       {recommendations?.summary ? (
-        <p className="max-w-3xl text-sm leading-relaxed">
+        <p className="max-w-[70ch] text-sm leading-relaxed">
           {recommendations.summary}
         </p>
       ) : null}
@@ -73,7 +71,7 @@ export function ExerciseList({
           </CardHeader>
         </Card>
       ) : (
-        <div className="grid gap-4 @3xl/main:grid-cols-2">
+        <div className="grid gap-3 @3xl/main:grid-cols-2">
           {exercises.map((exercise, index) => (
             <Card key={exercise.id} className="flex flex-col">
               <CardHeader>
@@ -97,9 +95,7 @@ export function ExerciseList({
                 ) : null}
                 {exercise.suggested_frequency ? (
                   <div>
-                    <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                      How often
-                    </p>
+                    <p className="eyebrow">How often</p>
                     <p className="leading-relaxed">
                       {exercise.suggested_frequency}
                     </p>
@@ -107,9 +103,7 @@ export function ExerciseList({
                 ) : null}
                 {exercise.rationale ? (
                   <div>
-                    <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                      Why this one
-                    </p>
+                    <p className="eyebrow">Why this one</p>
                     <p className="leading-relaxed text-muted-foreground">
                       {exercise.rationale}
                     </p>

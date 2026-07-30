@@ -8,7 +8,7 @@
  * "not recorded".
  */
 
-import type { SeverityTier } from "@/lib/api"
+import type { Finding, SeverityTier, Strength, Urgency } from "@/lib/api"
 
 /**
  * Placeholder for values that were not recorded.
@@ -107,6 +107,111 @@ export function tierRank(tier: SeverityTier | null | undefined): number {
 export function humanizeFlag(flag: string): string {
   return flag.replace(/^protocol:/, "").replace(/_/g, " ")
 }
+
+/**
+ * Turns a measured-field key into a readable label.
+ *
+ * The indications panel reports whatever fields each check used, so the keys are
+ * not known ahead of time and cannot be mapped by hand. Unit suffixes are the part
+ * worth special-casing: "residual rms offset units" reads as four unrelated words,
+ * whereas moving the unit into parentheses makes the quantity and its unit obvious.
+ */
+const UNIT_SUFFIXES: Array<[RegExp, string]> = [
+  [/_offset_units$/, " (socket units)"],
+  [/_per_min$/, " (per minute)"],
+  [/_per_s$/, " (per second)"],
+  [/_hz$/, " (Hz)"],
+  [/_deg$/, " (degrees)"],
+  [/_dps$/, " (deg/s)"],
+  [/_s$/, " (seconds)"],
+]
+
+export function humanizeKey(key: string): string {
+  let unit = ""
+  let stem = key
+  for (const [pattern, suffix] of UNIT_SUFFIXES) {
+    if (pattern.test(stem)) {
+      unit = suffix
+      stem = stem.replace(pattern, "")
+      break
+    }
+  }
+  const words = stem.replace(/_/g, " ").trim()
+  return words.charAt(0).toUpperCase() + words.slice(1) + unit
+}
+
+/** Renders any value out of a `measured` or `thresholds` map. */
+export function formatMeasured(
+  value: number | string | number[] | null | undefined
+): string {
+  if (value === null || value === undefined) return MISSING
+  if (Array.isArray(value)) return value.join(" to ")
+  if (typeof value === "string") return value.replace(/_/g, " ")
+  if (!Number.isFinite(value)) return MISSING
+  if (Number.isInteger(value)) return String(value)
+  // Small magnitudes here are socket-normalised units, where the interesting
+  // digits are the fourth and fifth. Rounding them to two would erase the value.
+  if (Math.abs(value) < 0.01) return value.toPrecision(2)
+  if (Math.abs(value) < 1) return value.toFixed(3)
+  return value.toFixed(2)
+}
+
+/**
+ * Indication colours.
+ *
+ * Same reasoning as the tier scale: no green anywhere. A green "not indicated"
+ * chip would read as an all-clear, and scoring/indications.py is explicit that a
+ * negative result means one measurement did not cross one provisional threshold in
+ * one session. Slate for that, amber and rose for flagged, and a distinctly
+ * different treatment (dashed, muted) for "could not be assessed" so it never
+ * looks like a quiet pass.
+ */
+export const FINDING_STYLES: Record<Finding, string> = {
+  indicated:
+    "border-amber-400/70 bg-amber-100/70 text-amber-950 dark:border-amber-800 dark:bg-amber-950/60 dark:text-amber-100",
+  not_indicated:
+    "border-slate-300 bg-slate-100 text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300",
+  not_assessable:
+    "border-dashed border-muted-foreground/40 bg-transparent text-muted-foreground",
+}
+
+export const FINDING_LABELS: Record<Finding, string> = {
+  indicated: "Signal flagged",
+  not_indicated: "Nothing flagged",
+  not_assessable: "Not assessable",
+}
+
+export const STRENGTH_LABELS: Record<Strength, string> = {
+  borderline: "Borderline",
+  present: "Present",
+  marked: "Marked",
+}
+
+export const URGENCY_LABELS: Record<Urgency, string> = {
+  routine: "Routine review",
+  prompt: "Worth prompt review",
+  emergency_if_new: "Emergency if new",
+}
+
+export const URGENCY_STYLES: Record<Urgency, string> = {
+  routine: "border-border bg-muted text-muted-foreground",
+  prompt:
+    "border-amber-400 bg-amber-100 text-amber-950 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-100",
+  emergency_if_new:
+    "border-rose-400 bg-rose-100 text-rose-950 dark:border-rose-700 dark:bg-rose-950 dark:text-rose-100",
+}
+
+export const EVIDENCE_LABELS: Record<string, string> = {
+  published_sign_provisional_threshold: "Published sign, provisional threshold",
+  bespoke_metric_arbitrary_threshold: "Bespoke metric, arbitrary threshold",
+}
+
+/** Ordering for the panel: flagged first, then unassessable, then negative. */
+export const FINDING_ORDER: Finding[] = [
+  "indicated",
+  "not_assessable",
+  "not_indicated",
+]
 
 /** Plain-language explanation of the scoring status values. */
 export const STATUS_LABELS: Record<string, string> = {

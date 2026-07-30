@@ -3,36 +3,45 @@
 /**
  * Sessions list table.
  *
- * Built on the same TanStack Table + shadcn primitives the dashboard-01 block
- * uses, so it matches visually. What it drops from that block: drag-to-reorder
- * rows and selection checkboxes. Reordering immutable capture records is an
- * affordance the app cannot honour, and bulk selection has nothing to act on.
+ * WHY THIS IS HAND-ROLLED RATHER THAN TANSTACK TABLE
+ *     It used TanStack, matching the dashboard-01 block it came from. Two reasons
+ *     it does not any more. The React Compiler refuses to memoize any component
+ *     calling useReactTable, because the hook returns functions that cannot be
+ *     memoized safely, so this file was the one compiler bailout in the app and it
+ *     showed up as a lint error on every run. And the library was earning almost
+ *     nothing: no pagination, no filtering through the table, no column visibility,
+ *     no grouping. Sorting seven columns of a list that is already fully loaded in
+ *     memory is about twenty lines of code.
  *
- * Sorting is kept, because it genuinely helps compare sessions and changes nothing
- * on the server. Tier sorting follows clinical order rather than alphabetical.
+ *     What is kept from the block: sorting, because comparing sessions genuinely
+ *     needs it. What was dropped: drag-to-reorder, which is an affordance this app
+ *     cannot honour on immutable capture records.
  *
- * A tier filter lives above the table; it is client-side because the whole list is
- * already loaded and a round trip would make it feel slower for no benefit.
+ * SELECTION EXISTS TO SERVE DELETION
+ *     The demo block shipped checkboxes with nothing to act on. These have
+ *     something: a session is a file on disk, captures accumulate fast while
+ *     testing, and removing them one confirmation dialog at a time is tedious
+ *     enough that people stop doing it and the list stops being useful.
  */
 
 import * as React from "react"
 import Link from "next/link"
-import {
-  type ColumnDef,
-  type SortingState,
-  flexRender,
-  getCoreRowModel,
-  getSortedRowModel,
-  useReactTable,
-} from "@tanstack/react-table"
+import { useRouter } from "next/navigation"
+import { toast } from "sonner"
 import {
   ArrowDownIcon,
   ArrowUpDownIcon,
   ArrowUpIcon,
   ChevronRightIcon,
+  Trash2Icon,
 } from "lucide-react"
 
+import { ConfirmButton } from "@/components/confirm-button"
+import { DeleteSessionButton } from "@/components/delete-session-button"
+import { IndicationChips } from "@/components/indication-chips"
+import { ObjectiveSignalBadge, ProtocolBadge, TierBadge } from "@/components/tier-badge"
 import { Button } from "@/components/ui/button"
+import { Checkbox } from "@/components/ui/checkbox"
 import {
   Table,
   TableBody,
@@ -41,8 +50,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table"
-import { DeleteSessionButton } from "@/components/delete-session-button"
-import { ObjectiveSignalBadge, ProtocolBadge, TierBadge } from "@/components/tier-badge"
+import { deleteSessions } from "@/lib/actions"
 import type { SessionSummary, SeverityTier } from "@/lib/api"
 import {
   TIER_ORDER,
@@ -53,27 +61,61 @@ import {
   tierRank,
 } from "@/lib/format"
 
+type SortKey = "captured_at" | "symptom_score" | "severity_tier" | "indications"
+type Direction = "asc" | "desc"
+
+const HEAD_CLASS = "eyebrow whitespace-nowrap"
+
+/** Comparators. Each returns "a before b" ordering for the ascending case. */
+const COMPARATORS: Record<
+  SortKey,
+  (a: SessionSummary, b: SessionSummary) => number
+> = {
+  captured_at: (a, b) => (a.captured_at ?? "").localeCompare(b.captured_at ?? ""),
+  // A session with no score sorts to one end rather than being treated as 0,
+  // because 0 is a real result here and must not mix in with "not reported".
+  symptom_score: (a, b) => {
+    const x = a.symptom_score
+    const y = b.symptom_score
+    if (!isPresent(x)) return isPresent(y) ? -1 : 0
+    if (!isPresent(y)) return 1
+    return x - y
+  },
+  // Clinical ordering, not alphabetical: "mild before moderate" alphabetically is
+  // luck, whereas minimal < mild < moderate < pronounced is meaning.
+  severity_tier: (a, b) => tierRank(a.severity_tier) - tierRank(b.severity_tier),
+  indications: (a, b) =>
+    (a.indications_indicated?.length ?? 0) -
+    (b.indications_indicated?.length ?? 0),
+}
+
 function SortHeader({
   label,
-  sorted,
+  active,
+  direction,
   onToggle,
+  align = "start",
 }: {
   label: string
-  sorted: false | "asc" | "desc"
+  active: boolean
+  direction: Direction
   onToggle: () => void
+  align?: "start" | "end"
 }) {
-  const Icon =
-    sorted === "asc"
+  const Icon = !active
+    ? ArrowUpDownIcon
+    : direction === "asc"
       ? ArrowUpIcon
-      : sorted === "desc"
-        ? ArrowDownIcon
-        : ArrowUpDownIcon
+      : ArrowDownIcon
   return (
     <Button
       variant="ghost"
-      size="sm"
+      size="xs"
       onClick={onToggle}
-      className="-ml-2 h-7 gap-1 px-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground"
+      className={`eyebrow -mx-1.5 gap-1 ${
+        align === "end" ? "ml-auto" : ""
+      } ${active ? "text-foreground" : ""}`}
+      aria-label={`Sort by ${label}`}
     >
       {label}
       <Icon className="size-3 opacity-60" />
@@ -81,143 +123,15 @@ function SortHeader({
   )
 }
 
-const HEAD_CLASS =
-  "text-xs font-semibold uppercase tracking-wider text-muted-foreground"
-
-function buildColumns(): ColumnDef<SessionSummary>[] {
-  return [
-    {
-      accessorKey: "captured_at",
-      header: ({ column }) => (
-        <SortHeader
-          label="Recorded"
-          sorted={column.getIsSorted()}
-          onToggle={() => column.toggleSorting(column.getIsSorted() === "asc")}
-        />
-      ),
-      cell: ({ row }) => (
-        <Link
-          href={`/sessions/${row.original.id}`}
-          className="group inline-flex items-center gap-1.5 font-medium underline-offset-4 hover:underline"
-        >
-          {formatDateTime(row.original.captured_at)}
-          <ChevronRightIcon className="size-3.5 opacity-0 transition-opacity group-hover:opacity-60" />
-        </Link>
-      ),
-    },
-    {
-      accessorKey: "symptom_score",
-      header: ({ column }) => (
-        <SortHeader
-          label="Symptoms"
-          sorted={column.getIsSorted()}
-          onToggle={() => column.toggleSorting(column.getIsSorted() === "asc")}
-        />
-      ),
-      cell: ({ row }) => {
-        const score = row.original.symptom_score
-        // 0 is a real result ("no symptoms"), so it must not render like a value
-        // the patient never gave.
-        if (!isPresent(score)) {
-          return (
-            <span className="text-xs text-muted-foreground">Not reported</span>
-          )
-        }
-        return (
-          <span className="font-mono text-sm tabular-nums">
-            {score}
-            <span className="text-muted-foreground"> / 10</span>
-          </span>
-        )
-      },
-      sortingFn: (a, b) => {
-        const x = a.original.symptom_score
-        const y = b.original.symptom_score
-        if (!isPresent(x)) return isPresent(y) ? -1 : 0
-        if (!isPresent(y)) return 1
-        return x - y
-      },
-    },
-    {
-      accessorKey: "severity_tier",
-      header: ({ column }) => (
-        <SortHeader
-          label="Tier"
-          sorted={column.getIsSorted()}
-          onToggle={() => column.toggleSorting(column.getIsSorted() === "asc")}
-        />
-      ),
-      cell: ({ row }) => <TierBadge tier={row.original.severity_tier} />,
-      // Clinical ordering, not alphabetical: "mild before moderate" alphabetically
-      // is luck, whereas minimal < mild < moderate < pronounced is meaning.
-      sortingFn: (a, b) =>
-        tierRank(a.original.severity_tier) - tierRank(b.original.severity_tier),
-    },
-    {
-      id: "objective",
-      header: () => <span className={HEAD_CLASS}>Camera</span>,
-      cell: ({ row }) => (
-        <ObjectiveSignalBadge usable={row.original.objective_signal_usable} />
-      ),
-      enableSorting: false,
-    },
-    {
-      id: "protocol",
-      header: () => <span className={HEAD_CLASS}>Protocol</span>,
-      cell: ({ row }) => (
-        <ProtocolBadge comparable={row.original.comparable_to_clinical_protocol} />
-      ),
-      enableSorting: false,
-    },
-    {
-      accessorKey: "completed_reps",
-      header: () => <span className={`${HEAD_CLASS} block text-right`}>Reps</span>,
-      cell: ({ row }) => (
-        <div className="font-mono text-sm text-right tabular-nums">
-          {int(row.original.completed_reps)}
-        </div>
-      ),
-      enableSorting: false,
-    },
-    {
-      accessorKey: "face_detection_rate",
-      header: () => (
-        <span className={`${HEAD_CLASS} block text-right`}>Tracked</span>
-      ),
-      cell: ({ row }) => (
-        <div className="font-mono text-sm text-right tabular-nums">
-          {percent(row.original.face_detection_rate)}
-        </div>
-      ),
-      enableSorting: false,
-    },
-    {
-      id: "actions",
-      header: () => <span className="sr-only">Actions</span>,
-      cell: ({ row }) => (
-        <div className="flex justify-end">
-          <DeleteSessionButton
-            id={row.original.id}
-            capturedAt={formatDateTime(row.original.captured_at)}
-            size="xs"
-            variant="ghost"
-          />
-        </div>
-      ),
-      enableSorting: false,
-    },
-  ]
-}
-
 export function SessionsTable({ sessions }: { sessions: SessionSummary[] }) {
-  const [sorting, setSorting] = React.useState<SortingState>([
-    { id: "captured_at", desc: true },
-  ])
+  const router = useRouter()
+  const [sortKey, setSortKey] = React.useState<SortKey>("captured_at")
+  const [direction, setDirection] = React.useState<Direction>("desc")
   const [tierFilter, setTierFilter] = React.useState<SeverityTier | null>(null)
+  const [flaggedOnly, setFlaggedOnly] = React.useState(false)
+  const [selected, setSelected] = React.useState<ReadonlySet<string>>(new Set())
 
-  const columns = React.useMemo(buildColumns, [])
-
-  const present = React.useMemo(() => {
+  const tierCounts = React.useMemo(() => {
     const counts = new Map<SeverityTier, number>()
     for (const session of sessions) {
       if (session.severity_tier) {
@@ -230,103 +144,315 @@ export function SessionsTable({ sessions }: { sessions: SessionSummary[] }) {
     return counts
   }, [sessions])
 
-  const filtered = React.useMemo(
+  const flaggedCount = React.useMemo(
     () =>
-      tierFilter
-        ? sessions.filter((session) => session.severity_tier === tierFilter)
-        : sessions,
-    [sessions, tierFilter]
+      sessions.filter((s) => (s.indications_indicated?.length ?? 0) > 0).length,
+    [sessions]
   )
 
-  const table = useReactTable({
-    data: filtered,
-    columns,
-    state: { sorting },
-    onSortingChange: setSorting,
-    getCoreRowModel: getCoreRowModel(),
-    getSortedRowModel: getSortedRowModel(),
-  })
+  const rows = React.useMemo(() => {
+    const filtered = sessions.filter((session) => {
+      if (tierFilter && session.severity_tier !== tierFilter) return false
+      if (flaggedOnly && (session.indications_indicated?.length ?? 0) === 0) {
+        return false
+      }
+      return true
+    })
+    const sign = direction === "asc" ? 1 : -1
+    return [...filtered].sort((a, b) => sign * COMPARATORS[sortKey](a, b))
+  }, [sessions, tierFilter, flaggedOnly, sortKey, direction])
+
+  const toggleSort = (key: SortKey) => {
+    if (key === sortKey) {
+      setDirection((current) => (current === "asc" ? "desc" : "asc"))
+    } else {
+      setSortKey(key)
+      // Dates and counts are most useful highest-first; the tier scale reads
+      // better ascending, matching how the bands are written down.
+      setDirection(key === "severity_tier" ? "asc" : "desc")
+    }
+  }
+
+  const toggleRow = (id: string) => {
+    setSelected((current) => {
+      const next = new Set(current)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  // Selection is scoped to what is on screen: selecting all, then filtering, then
+  // deleting must not remove rows the user can no longer see.
+  const visibleSelected = rows.filter((row) => selected.has(row.id))
+  const allVisibleSelected =
+    rows.length > 0 && visibleSelected.length === rows.length
+
+  const deleteSelected = async () => {
+    const ids = visibleSelected.map((row) => row.id)
+    const result = await deleteSessions(ids)
+    setSelected(new Set())
+
+    if (result.failed.length === 0) {
+      toast.success(
+        `Deleted ${result.deleted.length} session${
+          result.deleted.length === 1 ? "" : "s"
+        }`,
+        { description: "The files were moved to sessions/_deleted/." }
+      )
+    } else {
+      toast.error(
+        `Deleted ${result.deleted.length} of ${ids.length}`,
+        { description: result.failed[0].error }
+      )
+    }
+    router.refresh()
+  }
 
   return (
     <div className="space-y-3">
-      {present.size > 1 ? (
-        <div className="flex flex-wrap items-center gap-1.5">
-          <Button
-            variant={tierFilter === null ? "secondary" : "ghost"}
-            size="xs"
-            onClick={() => setTierFilter(null)}
-          >
-            All {sessions.length}
-          </Button>
-          {TIER_ORDER.filter((tier) => present.has(tier)).map((tier) => (
-            <Button
-              key={tier}
-              variant={tierFilter === tier ? "secondary" : "ghost"}
-              size="xs"
-              onClick={() => setTierFilter(tierFilter === tier ? null : tier)}
-              className="capitalize"
-            >
-              {tier} {present.get(tier)}
-            </Button>
-          ))}
-        </div>
-      ) : null}
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5">
+        {tierCounts.size > 1 ? (
+          <>
+            <FilterChip
+              label={`All ${sessions.length}`}
+              active={tierFilter === null}
+              onClick={() => setTierFilter(null)}
+            />
+            {TIER_ORDER.filter((tier) => tierCounts.has(tier)).map((tier) => (
+              <FilterChip
+                key={tier}
+                label={`${tier} ${tierCounts.get(tier)}`}
+                active={tierFilter === tier}
+                onClick={() => setTierFilter(tierFilter === tier ? null : tier)}
+                className="capitalize"
+              />
+            ))}
+          </>
+        ) : null}
 
-      <div className="overflow-hidden rounded-xl border">
+        {flaggedCount > 0 ? (
+          <FilterChip
+            label={`Flagged ${flaggedCount}`}
+            active={flaggedOnly}
+            onClick={() => setFlaggedOnly((on) => !on)}
+            className="border border-amber-400/60 text-amber-950 dark:text-amber-100"
+          />
+        ) : null}
+
+        {visibleSelected.length > 0 ? (
+          <div className="ml-auto flex items-center gap-2">
+            <span className="text-xs text-muted-foreground tabular-nums">
+              {visibleSelected.length} selected
+            </span>
+            <ConfirmButton
+              trigger={
+                <Button variant="destructive" size="xs">
+                  <Trash2Icon className="size-3" />
+                  Delete selected
+                </Button>
+              }
+              title={`Delete ${visibleSelected.length} session${
+                visibleSelected.length === 1 ? "" : "s"
+              }?`}
+              description={
+                <>
+                  <p>
+                    These sessions will be removed from the dashboard. Their files
+                    move into{" "}
+                    <code className="rounded bg-muted px-1 py-0.5 text-xs">
+                      sessions/_deleted/
+                    </code>{" "}
+                    rather than being erased, so they can be recovered by hand.
+                  </p>
+                  <p>
+                    A capture records something a person physically did and cannot
+                    be regenerated from anything else on disk.
+                  </p>
+                </>
+              }
+              confirmLabel={`Delete ${visibleSelected.length}`}
+              onConfirm={deleteSelected}
+              size="sm"
+            />
+          </div>
+        ) : null}
+      </div>
+
+      <div className="overflow-hidden rounded-xl ring-1 ring-foreground/10">
         <div className="overflow-x-auto">
           <Table>
-            <TableHeader className="bg-muted/40">
-              {table.getHeaderGroups().map((headerGroup) => (
-                <TableRow key={headerGroup.id} className="hover:bg-transparent">
-                  {headerGroup.headers.map((header) => (
-                    <TableHead
-                      key={header.id}
-                      className="h-10 whitespace-nowrap"
-                    >
-                      {header.isPlaceholder
-                        ? null
-                        : flexRender(
-                            header.column.columnDef.header,
-                            header.getContext()
-                          )}
-                    </TableHead>
-                  ))}
-                </TableRow>
-              ))}
+            <TableHeader className="bg-surface">
+              <TableRow className="hover:bg-transparent">
+                <TableHead className="h-10 w-9 pl-3">
+                  <Checkbox
+                    checked={allVisibleSelected}
+                    onCheckedChange={(checked) =>
+                      setSelected(
+                        checked ? new Set(rows.map((row) => row.id)) : new Set()
+                      )
+                    }
+                    aria-label="Select all visible sessions"
+                  />
+                </TableHead>
+                <TableHead className="h-10">
+                  <SortHeader
+                    label="Recorded"
+                    active={sortKey === "captured_at"}
+                    direction={direction}
+                    onToggle={() => toggleSort("captured_at")}
+                  />
+                </TableHead>
+                <TableHead className="h-10">
+                  <SortHeader
+                    label="Symptoms"
+                    active={sortKey === "symptom_score"}
+                    direction={direction}
+                    onToggle={() => toggleSort("symptom_score")}
+                  />
+                </TableHead>
+                <TableHead className="h-10">
+                  <SortHeader
+                    label="Tier"
+                    active={sortKey === "severity_tier"}
+                    direction={direction}
+                    onToggle={() => toggleSort("severity_tier")}
+                  />
+                </TableHead>
+                <TableHead className="h-10">
+                  <SortHeader
+                    label="Indications"
+                    active={sortKey === "indications"}
+                    direction={direction}
+                    onToggle={() => toggleSort("indications")}
+                  />
+                </TableHead>
+                <TableHead className={`h-10 ${HEAD_CLASS}`}>Camera</TableHead>
+                <TableHead className={`h-10 ${HEAD_CLASS}`}>Protocol</TableHead>
+                <TableHead className={`h-10 text-right ${HEAD_CLASS}`}>
+                  Reps
+                </TableHead>
+                <TableHead className={`h-10 text-right ${HEAD_CLASS}`}>
+                  Tracked
+                </TableHead>
+                <TableHead className="h-10 w-10">
+                  <span className="sr-only">Actions</span>
+                </TableHead>
+              </TableRow>
             </TableHeader>
             <TableBody>
-              {table.getRowModel().rows.length ? (
-                table.getRowModel().rows.map((row) => (
-                  <TableRow
-                    key={row.id}
-                    className="transition-colors hover:bg-accent/40"
-                  >
-                    {row.getVisibleCells().map((cell) => (
-                      <TableCell key={cell.id} className="whitespace-nowrap py-2.5">
-                        {flexRender(
-                          cell.column.columnDef.cell,
-                          cell.getContext()
-                        )}
-                      </TableCell>
-                    ))}
-                  </TableRow>
-                ))
-              ) : (
+              {rows.length === 0 ? (
                 <TableRow>
                   <TableCell
-                    colSpan={columns.length}
+                    colSpan={10}
                     className="h-20 text-center text-sm text-muted-foreground"
                   >
                     {tierFilter
                       ? `No sessions in the ${tierFilter} band.`
-                      : "No sessions yet."}
+                      : flaggedOnly
+                        ? "No sessions have a flagged indication."
+                        : "No sessions yet."}
                   </TableCell>
                 </TableRow>
+              ) : (
+                rows.map((session) => (
+                  <TableRow
+                    key={session.id}
+                    data-selected={selected.has(session.id) || undefined}
+                    className="transition-colors hover:bg-surface data-selected:bg-accent/40"
+                  >
+                    <TableCell className="pl-3">
+                      <Checkbox
+                        checked={selected.has(session.id)}
+                        onCheckedChange={() => toggleRow(session.id)}
+                        aria-label={`Select session ${session.id}`}
+                      />
+                    </TableCell>
+                    <TableCell className="py-2.5 whitespace-nowrap">
+                      <Link
+                        href={`/sessions/${session.id}`}
+                        className="group inline-flex items-center gap-1.5 font-medium underline-offset-4 hover:underline"
+                      >
+                        {formatDateTime(session.captured_at)}
+                        <ChevronRightIcon className="size-3.5 opacity-0 transition-opacity group-hover:opacity-60" />
+                      </Link>
+                    </TableCell>
+                    <TableCell className="py-2.5 whitespace-nowrap">
+                      {isPresent(session.symptom_score) ? (
+                        <span className="font-mono text-sm tabular-nums">
+                          {session.symptom_score}
+                          <span className="text-muted-foreground"> / 10</span>
+                        </span>
+                      ) : (
+                        <span className="text-xs text-muted-foreground">
+                          Not reported
+                        </span>
+                      )}
+                    </TableCell>
+                    <TableCell className="py-2.5">
+                      <TierBadge tier={session.severity_tier} />
+                    </TableCell>
+                    <TableCell className="py-2.5">
+                      <IndicationChips
+                        indicated={session.indications_indicated}
+                        notAssessable={session.indications_not_assessable}
+                        checksRun={session.indications_checks_run}
+                      />
+                    </TableCell>
+                    <TableCell className="py-2.5">
+                      <ObjectiveSignalBadge
+                        usable={session.objective_signal_usable}
+                      />
+                    </TableCell>
+                    <TableCell className="py-2.5">
+                      <ProtocolBadge
+                        comparable={session.comparable_to_clinical_protocol}
+                      />
+                    </TableCell>
+                    <TableCell className="py-2.5 text-right font-mono text-sm tabular-nums">
+                      {int(session.completed_reps)}
+                    </TableCell>
+                    <TableCell className="py-2.5 text-right font-mono text-sm tabular-nums">
+                      {percent(session.face_detection_rate)}
+                    </TableCell>
+                    <TableCell className="py-2.5">
+                      <DeleteSessionButton
+                        id={session.id}
+                        capturedAt={formatDateTime(session.captured_at)}
+                        size="xs"
+                        variant="ghost"
+                      />
+                    </TableCell>
+                  </TableRow>
+                ))
               )}
             </TableBody>
           </Table>
         </div>
       </div>
     </div>
+  )
+}
+
+function FilterChip({
+  label,
+  active,
+  onClick,
+  className = "",
+}: {
+  label: string
+  active: boolean
+  onClick: () => void
+  className?: string
+}) {
+  return (
+    <Button
+      variant={active ? "secondary" : "ghost"}
+      size="xs"
+      onClick={onClick}
+      className={className}
+    >
+      {label}
+    </Button>
   )
 }

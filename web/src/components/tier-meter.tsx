@@ -63,10 +63,8 @@ export function TierMeter({
               <div
                 key={band.name}
                 style={{ width: `${(band.width / total) * 100}%` }}
-                className={`h-full transition-opacity ${
-                  active
-                    ? SEGMENT_FILL[band.name]
-                    : "bg-muted opacity-70"
+                className={`h-full ${
+                  active ? SEGMENT_FILL[band.name] : "bg-muted opacity-70"
                 }`}
               />
             )
@@ -74,11 +72,16 @@ export function TierMeter({
         </div>
 
         {markerPercent !== null ? (
+          // The marker sweeps out from the left on first paint. It is the one
+          // moving thing on the page, and it draws the eye to the number that
+          // matters rather than decorating something that does not.
           <div
-            className="absolute -top-1 h-4.5 w-0.5 rounded-full bg-foreground transition-[left]"
-            style={{ left: `calc(${markerPercent}% - 1px)` }}
+            className="animate-sweep absolute -top-1 h-4.5 origin-left"
+            style={{ width: `calc(${markerPercent}% + 1px)` }}
             aria-hidden="true"
-          />
+          >
+            <span className="absolute top-0 right-0 h-full w-0.5 rounded-full bg-foreground" />
+          </div>
         ) : null}
       </div>
 

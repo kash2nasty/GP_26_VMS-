@@ -1,13 +1,15 @@
 import type { Metadata } from "next";
 import { IBM_Plex_Mono, Inter, Source_Serif_4 } from "next/font/google";
+import { ThemeProvider } from "@/components/theme-provider";
+import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import "./globals.css";
 
 /**
- * Type pairing: a transitional serif for headings against a neutral grotesque
- * for body copy. The serif carries the "formal" register without reaching for
- * anything decorative, and Source Serif was designed for screen text so it holds
- * up at the card-title sizes used here.
+ * Type pairing: a transitional serif for headings against a neutral grotesque for
+ * body copy. The serif carries the "formal" register without reaching for anything
+ * decorative, and Source Serif was designed for screen text so it holds up at the
+ * card-title sizes used here.
  *
  * The CSS variable names line up with the `--font-sans` / `--font-serif` /
  * `--font-mono` that globals.css consumes in its @theme block.
@@ -32,9 +34,9 @@ const mono = IBM_Plex_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "VMS Screening Results",
+  title: "Oculomotor Screening",
   description:
-    "Read-only dashboard for VOMS visual-motion screening sessions. Screening data only, not a clinical determination.",
+    "Head, eye, eyelid and facial screening signals from one webcam capture. Screening data only, not a clinical determination.",
 };
 
 export default function RootLayout({
@@ -45,12 +47,18 @@ export default function RootLayout({
   return (
     <html
       lang="en"
+      // Required by next-themes: it writes the theme class onto <html> before
+      // React hydrates, so server and client markup differ here by design.
+      suppressHydrationWarning
       className={`${sans.variable} ${serif.variable} ${mono.variable} h-full antialiased`}
     >
-      {/* TooltipProvider is required by the shadcn sidebar's collapsed-state
-          tooltips; the CLI flags this when adding the tooltip component. */}
-      <body className="min-h-full flex flex-col">
-        <TooltipProvider>{children}</TooltipProvider>
+      <body className="flex min-h-full flex-col">
+        <ThemeProvider>
+          {/* TooltipProvider is required by the shadcn sidebar's collapsed-state
+              tooltips; the CLI flags this when adding the tooltip component. */}
+          <TooltipProvider>{children}</TooltipProvider>
+          <Toaster position="bottom-right" />
+        </ThemeProvider>
       </body>
     </html>
   );

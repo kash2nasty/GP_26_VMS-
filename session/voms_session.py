@@ -7,16 +7,21 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from tracking.face_tracker import FrameRecord
-from . import metrics
+from . import metrics, signals
 
 TEST_TYPE = "VOMS_visual_motion_subtest"
 DISCLAIMER = (
     "This output is a screening data point only and is NOT a medical diagnosis. "
-    "Visual motion sensitivity cannot be diagnosed from these measurements alone. "
-    "Results must be reviewed and interpreted by a qualified clinician in the "
-    "context of a full clinical assessment."
+    "No condition can be diagnosed from these measurements alone. The head, eye, "
+    "eyelid and facial signals recorded here are screening observations, not "
+    "clinical findings. Results must be reviewed and interpreted by a qualified "
+    "clinician in the context of a full clinical assessment."
 )
-SCHEMA_VERSION = "0.1.0"
+
+# 0.2.0 adds the oculomotor_signals, ocular_alignment, eyelid_signals,
+# head_control and facial_symmetry blocks. Everything the 0.1.0 shape carried is
+# still present and unchanged, so a reader written against 0.1.0 keeps working.
+SCHEMA_VERSION = "0.2.0"
 
 
 @dataclass
@@ -47,6 +52,12 @@ class VOMSSession:
         self._ended_at: float | None = None
         self._first_ts_ms: int | None = None
         self._last_ts_ms: int | None = None
+        # Memo for _analyze(), keyed on how many frames it covered. Live capture
+        # asks for completed_reps() and then is_complete() after every single
+        # frame, and is_complete() asks for completed_reps() again, so a naive
+        # _analyze() ran three full passes over the whole session per frame. That
+        # is quadratic in frame count for an answer that cannot have changed.
+        self._analysis_cache: tuple[int, dict | None] | None = None
 
     # ---- lifecycle -------------------------------------------------------
 
@@ -56,11 +67,13 @@ class VOMSSession:
         self._ended_at = None
         self._first_ts_ms = None
         self._last_ts_ms = None
+        self._analysis_cache = None
 
     def record_frame(self, record: FrameRecord):
         if self._started_at is None:
             raise RuntimeError("start_session() must be called before record_frame()")
         self._records.append(record)
+        self._analysis_cache = None
         if self._first_ts_ms is None:
             self._first_ts_ms = record.timestamp_ms
         self._last_ts_ms = record.timestamp_ms
@@ -75,7 +88,14 @@ class VOMSSession:
     # ---- live progress ---------------------------------------------------
 
     def _analyze(self):
-        """Compute the derived signals from everything recorded so far."""
+        """Derived signals from everything recorded so far, memoized per frame count."""
+        if self._analysis_cache is not None and self._analysis_cache[0] == len(self._records):
+            return self._analysis_cache[1]
+        analysis = self._analyze_uncached()
+        self._analysis_cache = (len(self._records), analysis)
+        return analysis
+
+    def _analyze_uncached(self):
         tracked = [
             r for r in self._records
             if r.face_detected and r.head_yaw is not None
@@ -120,6 +140,12 @@ class VOMSSession:
         return {
             "times_s": times_s,
             "yaw": yaw,
+            # Unsmoothed, for the tremor search only. The 5-sample boxcar above
+            # exists to stop tracker jitter registering as a head reversal, and it
+            # attenuates a 4 Hz oscillation to about 43% of its real size, so
+            # measuring tremor on the smoothed trace under-reports it by more than
+            # a factor of two.
+            "yaw_raw": yaw_raw,
             "velocity": velocity,
             "iris_h": iris_h,
             "aperture": aperture,
@@ -196,8 +222,12 @@ class VOMSSession:
             )
 
         if a is None:
-            result["head_motion"] = {"insufficient_data": True}
-            result["gaze_stability"] = {"insufficient_data": True}
+            for block in (
+                "head_motion", "gaze_stability", "oculomotor_signals",
+                "ocular_alignment", "eyelid_signals", "head_control",
+                "facial_symmetry",
+            ):
+                result[block] = {"insufficient_data": True}
             return result
 
         sweeps = a["sweeps"]
@@ -255,6 +285,29 @@ class VOMSSession:
             "where the eyes were closed are excluded from the fit; see "
             "frames_excluded_blink."
         )
+
+        # ---- the wider signal set -----------------------------------------
+        #
+        # These read the same frames from a different angle. They are appended
+        # rather than folded into the blocks above so that a reader written
+        # against schema 0.1.0 sees exactly what it saw before, and so that a
+        # failure to interpret one of them can never affect the VOMS result the
+        # capture was actually run for.
+        blink_threshold = self.config.min_eye_aperture_ratio
+        result["oculomotor_signals"] = signals.oculomotor_signals(
+            a["times_s"], a["yaw"], a["iris_h"], a["aperture"], moving, blink_threshold
+        )
+        result["ocular_alignment"] = signals.ocular_alignment(
+            a["tracked"], a["aperture"], blink_threshold
+        )
+        result["eyelid_signals"] = signals.eyelid_signals(
+            a["times_s"], a["tracked"], a["aperture"], blink_threshold
+        )
+        result["head_control"] = signals.head_control(
+            a["times_s"], a["yaw"], a["iris_h"], moving,
+            sweeps, result["head_motion"], a["yaw_raw"],
+        )
+        result["facial_symmetry"] = signals.facial_symmetry(a["tracked"])
         return result
 
     @staticmethod

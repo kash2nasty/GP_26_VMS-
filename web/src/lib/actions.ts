@@ -56,3 +56,29 @@ export async function deleteSession(id: string): Promise<DeleteResult> {
     movedTo: body.moved_to ?? "_deleted/",
   }
 }
+
+export type BulkDeleteResult = {
+  deleted: string[]
+  failed: Array<{ id: string; error: string }>
+}
+
+/**
+ * Delete several sessions.
+ *
+ * Sequential rather than concurrent, and it keeps going after a failure. Both
+ * choices are about the report it returns: the caller needs to know exactly which
+ * ids were removed, and firing a dozen concurrent DELETEs at a single-worker uvicorn
+ * process while it may also be servicing a capture buys nothing here.
+ */
+export async function deleteSessions(ids: string[]): Promise<BulkDeleteResult> {
+  const result: BulkDeleteResult = { deleted: [], failed: [] }
+  for (const id of ids) {
+    const outcome = await deleteSession(id)
+    if (outcome.ok) {
+      result.deleted.push(id)
+    } else {
+      result.failed.push({ id, error: outcome.error })
+    }
+  }
+  return result
+}

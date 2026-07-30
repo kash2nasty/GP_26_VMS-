@@ -1,18 +1,33 @@
-# VMS Screening Tool — Camera + Backend Prototype
+# Oculomotor Screening Tool - Camera, Backend and Dashboard
 
-Digitizes the **visual-motion subtest of VOMS** (Vestibular/Ocular Motor Screening).
+Digitizes the **visual-motion subtest of VOMS** (Vestibular/Ocular Motor Screening), then reads
+several further screening signals out of the same capture.
 
-In the clinical version of this test, the patient holds a thumb at arm's length, keeps their
+In the clinical version of the subtest, the patient holds a thumb at arm's length, keeps their
 gaze locked on it, and rotates head + eyes + trunk together as one unit, left and right, for a
 fixed number of reps. Afterward they rate symptom provocation 0-10. Poor gaze fixation *during*
 head motion is the signal the test is looking for.
 
-This phase captures and structures that data. **There is no UI, no diagnosis logic, and no
-scoring interpretation** — just clean motion + symptom data for a later layer to consume.
+## Beyond that one test
 
-> This tool produces a screening data point, not a medical diagnosis. Output must be reviewed
-> by a qualified clinician. The `disclaimer` field is baked into the output schema so it can't
-> be dropped later.
+The capture needed to answer that one question contains far more than the answer. Every frame
+carries head pose on three axes, both irises located inside their own sockets, both eyelid
+apertures, and the resting geometry of the mouth and brows. `session/signals.py` measures those,
+and `scoring/indications.py` turns them into a panel of twelve screening indications covering
+one-sided vestibular patterns, rhythmic eye oscillation, fixation breakdown, horizontal and
+vertical ocular misalignment, eyelid asymmetry, fatigable eyelid droop, blink-rate abnormality,
+resting facial asymmetry, restricted neck rotation and head tremor.
+
+The value is not that any one of them is strong. It is that a person who sat down for thirty
+seconds of head rotation gets checked for all of it at once, from frames that were already on
+disk. See [Screening indications](#screening-indications) for what each one measures, what it is
+associated with, and where it stops.
+
+> Every number here is a screening data point, not a medical diagnosis, and nothing in this
+> repository has been clinically validated. A check that flags nothing is **not** a clearance:
+> it means one measurement did not cross one provisional threshold in one session. Output must
+> be reviewed by a qualified clinician. The `disclaimer` field is baked into the output schema so
+> it cannot be dropped later.
 
 ---
 
@@ -37,7 +52,7 @@ curl -L -o models/face_landmarker.task https://storage.googleapis.com/mediapipe-
 **Do not upgrade mediapipe past 0.10.21 without re-verifying.** Starting at 0.10.30, MediaPipe's
 Windows wheels changed from properly-tagged per-Python builds (~50 MB) to generic
 `py3-none-win_amd64` wheels of only ~10-16 MB. A 10 MB wheel cannot contain the compiled native
-framework — this is the cause of the missing `mediapipe.framework` submodule on Windows. It
+framework - this is the cause of the missing `mediapipe.framework` submodule on Windows. It
 affects 0.10.30, 0.10.31, 0.10.32, 0.10.33, 0.10.35, and 1.0.0.
 
 `0.10.21` (Feb 2025) is the last release with complete Windows builds. It ships wheels for
@@ -72,7 +87,7 @@ JSON goes to stdout **and** to `sessions/session_<UTC timestamp>.json`.
 | `--fps` | `30` | Target capture FPS |
 | `--max-duration` | `120` | Hard stop, seconds |
 | `--preview` | off | Live window with yaw + rep counter |
-| `--symptom-score` | — | Supply 0-10 non-interactively |
+| `--symptom-score` | - | Supply 0-10 non-interactively |
 | `--no-prompt` | off | Record score as `null` |
 | `--model` | `models/face_landmarker.task` | Model bundle path |
 
@@ -81,12 +96,14 @@ JSON goes to stdout **and** to `sessions/session_<UTC timestamp>.json`.
 ## Project structure
 
 ```
-camera/capture.py          FrameSource — webcam or video file, same interface
+camera/capture.py          FrameSource - webcam or video file, same interface
 tracking/face_tracker.py   MediaPipe Face Landmarker -> per-frame FrameRecord
 tracking/landmarks.py      Landmark index constants (iris, eye corners)
 session/voms_session.py    Session API + result assembly
-session/metrics.py         Peak detection, angular velocity, gaze stability math
+session/metrics.py         Peak detection, angular velocity, gaze fit, spectral helpers
+session/signals.py         The wider signal set: oculomotor, eyelid, alignment, head control
 scoring/severity.py        Composite screening severity tiers
+scoring/indications.py     Twelve-check screening indications panel
 scoring/exercises.py       Tier -> Cawthorne-Cooksey exercise mapping
 scoring/protocol.py        Protocol-fidelity assessment vs standardized VOMS
 scoring/pipeline.py        enrich_session() -- shared by both entrypoints
@@ -101,6 +118,7 @@ check_yaw_ceiling.py       Measures the yaw angle where tracking degrades
 tests/test_gaze_sign.py    Regression tests for the iris sign convention
 tests/test_blink_rejection.py  Blink detection and exclusion from the gaze fit
 tests/test_scoring.py      Tier, gate, fidelity and exercise-mapping tests
+tests/test_indications.py  Wider signal set and the indications panel
 tests/test_api.py          API loading, edge shapes, and the no-mediapipe constraint
 tests/test_capture.py      Capture socket end-to-end through real MediaPipe
 models/                    face_landmarker.task
@@ -115,13 +133,14 @@ Plain asserts, no pytest required:
 python tests/test_gaze_sign.py
 python tests/test_blink_rejection.py
 python tests/test_scoring.py
+python tests/test_indications.py
 python tests/test_api.py
 python tests/test_capture.py     # slower: real MediaPipe over the capture socket
 ```
 
 These suites are mutation-tested: each threshold, gate and safety rule has a corresponding
 deliberate break that must turn them red. Two tests were found decorative that way and
-rewritten — a blink test that checked a reported count rather than actual exclusion, and a tier
+rewritten - a blink test that checked a reported count rather than actual exclusion, and a tier
 test whose fixture used symptom score 0, which multiplies the symptom weight away. If you retune
 a threshold, re-run that check rather than trusting a green suite.
 
@@ -152,13 +171,23 @@ result = session.end_session(symptom_score=4)   # -> dict, JSON-serializable
 
 | Field | Meaning |
 |---|---|
-| `schema_version` | Schema version, currently `0.1.0` |
+| `schema_version` | Schema version, currently `0.2.0` |
 | `test_type` | Always `"VOMS_visual_motion_subtest"` |
 | `disclaimer` | Not-a-diagnosis statement. Always present. |
 | `session` | Timing and configured target reps |
-| `tracking_quality` | Data-quality gate — check this before trusting metrics |
+| `tracking_quality` | Data-quality gate - check this before trusting metrics |
 | `head_motion` | Reps, amplitude, angular velocity, per-sweep detail |
 | `gaze_stability` | The core VMS-relevant fixation signal |
+| `oculomotor_signals` | Blink events, fixation breaks, rhythmic eye oscillation (0.2.0) |
+| `ocular_alignment` | Horizontal and vertical interocular disparity (0.2.0) |
+| `eyelid_signals` | Per-eye opening, asymmetry, and decline over the session (0.2.0) |
+| `head_control` | Direction-split gaze residual, off-axis coupling, head tremor (0.2.0) |
+| `facial_symmetry` | Resting mouth-corner and brow height difference (0.2.0) |
+
+Schema 0.2.0 is purely additive: every field the 0.1.0 shape carried is still present and
+unchanged, so a reader written against 0.1.0 keeps working. The five new blocks are absent from
+every file already on disk, and each one exposes `insufficient_data` plus `null` fields rather
+than zeros, so "never measured" stays distinguishable from "measured as zero".
 | `self_reported_symptoms` | The 0-10 patient rating |
 
 ### `tracking_quality`
@@ -167,7 +196,7 @@ result = session.end_session(symptom_score=4)   # -> dict, JSON-serializable
 |---|---|
 | `total_frames` / `frames_with_face` | Frame counts |
 | `face_detection_rate` | 0-1. Low values mean the rest of the data is unreliable. |
-| `mean_landmark_confidence` | Fraction of landmarks inside frame bounds (proxy — the Tasks API exposes no per-face score) |
+| `mean_landmark_confidence` | Fraction of landmarks inside frame bounds (proxy - the Tasks API exposes no per-face score) |
 | `effective_fps` | Achieved rate. MediaPipe inference, not the camera, is the limiter (~15-20 fps typical). |
 
 ### `head_motion`
@@ -191,13 +220,13 @@ Sweeps below `min_sweep_amplitude_deg` (20°) are ignored so tracker jitter and 
 readjustments don't inflate the rep count. An extreme is only confirmed once yaw reverses by
 `reversal_deg` (8°).
 
-### `gaze_stability` — the core signal
+### `gaze_stability` - the core signal
 
 When someone correctly fixates a stationary target while rotating their head, their eyes
 counter-rotate smoothly and proportionally against the head (vestibulo-ocular reflex). So iris
 position within the eye socket should be a near-**linear function of head yaw**.
 
-We fit that line across all moving frames. What matters is the **residual** — eye motion *not*
+We fit that line across all moving frames. What matters is the **residual** - eye motion *not*
 explained by smooth compensation, i.e. saccadic intrusions and fixation breaks.
 
 | Field | Meaning |
@@ -206,7 +235,7 @@ explained by smooth compensation, i.e. saccadic intrusions and fixation breaks.
 | `compensation_slope` | Fitted eye-vs-head gain |
 | `compensation_r2` | How linear the compensation was. Near 1.0 = smooth. |
 | `residual_rms_offset_units` | **Primary instability metric.** RMS unexplained eye motion. Higher = worse fixation. |
-| `residual_rms_deg_approx` | Same, converted to degrees — see caveat below |
+| `residual_rms_deg_approx` | Same, converted to degrees - see caveat below |
 | `residual_max_offset_units` | Worst single deviation |
 | `iris_std_during_motion_offset_units` | Raw iris spread during motion |
 | `fixation_stability_score` | Convenience 0-100, monotonic with residual. 100 = perfectly smooth. |
@@ -214,12 +243,12 @@ explained by smooth compensation, i.e. saccadic intrusions and fixation breaks.
 
 **Iris offset units:** socket-normalized. `[horizontal, vertical]`, where `0,0` is the socket
 center and roughly ±0.5 spans the socket. Measured in a local frame built from the eye corners,
-so it rotates with the head rather than the camera — this is what separates *eye* movement from
+so it rotates with the head rather than the camera - this is what separates *eye* movement from
 *head* movement.
 
 **Sign convention (load-bearing):** the two eyes' outer/temple corners sit on opposite sides of
 the face midline, so measuring each eye toward its own outer corner gives the eyes *opposing*
-signs during VOR — when both eyes are in fact rotating the same real-world direction. Since the
+signs during VOR - when both eyes are in fact rotating the same real-world direction. Since the
 session layer averages the eyes together, that cancels the physiological signal almost exactly
 and collapses `compensation_r2` toward 0 on perfectly good data. `both_iris_offsets()` in
 `tracking/face_tracker.py` owns the normalization and is the single source of truth for it;
@@ -234,7 +263,7 @@ indicative magnitudes. `residual_rms_offset_units` is the trustworthy figure for
 
 `score` is 0-10 (`null` if not provided), with `provided` as an explicit boolean and `scale` /
 `prompt` recorded alongside so the number is never interpreted without its context. Currently
-collected via a CLI `input()` prompt or the `--symptom-score` flag — deliberately stubbed, since
+collected via a CLI `input()` prompt or the `--symptom-score` flag - deliberately stubbed, since
 UI is out of scope for this phase.
 
 ---
@@ -242,7 +271,7 @@ UI is out of scope for this phase.
 ## Reading the results
 
 `face_detection_rate` and `reached_target_reps` are gates. If the face wasn't tracked reliably or
-the patient didn't complete the reps, the gaze numbers describe an incomplete test — not a
+the patient didn't complete the reps, the gaze numbers describe an incomplete test - not a
 finding. Check those first.
 
 The intended future comparison is **`residual_rms_offset_units` against the self-reported symptom
@@ -283,10 +312,10 @@ composite <  20 -> minimal     40 <= c < 65 -> moderate
 established ≥ 2 on any VOMS item as a positive screening cut-off, so `minimal` there would
 contradict the published anchor.
 
-**Calibration status — read before trusting the numbers.** The symptom cut-off is published.
+**Calibration status - read before trusting the numbers.** The symptom cut-off is published.
 Nothing on the objective side is: `fixation_stability_score` is bespoke to this tool and built
 on an arbitrary internal anchor, and degree values use an uncalibrated constant. The 0.60/0.40
-split reflects that asymmetry in evidence — the validated signal carries more weight — but the
+split reflects that asymmetry in evidence - the validated signal carries more weight - but the
 weights are a judgement call, not a fitted result. The formula is emitted in the output's
 `method` block, generated from the constants so it cannot drift from what was applied.
 
@@ -294,11 +323,11 @@ weights are a judgement call, not a fitted result. The formula is emitted in the
 
 The objective signal is only used if `face_detection_rate ≥ 0.75`, `compensation_r2 ≥ 0.50`,
 and `completed_reps ≥ 3`. Failing any gate drops to `status: symptom_only` with the failed
-gates listed — never a silent fallback. If neither input is usable, `status:
+gates listed - never a silent fallback. If neither input is usable, `status:
 insufficient_data`, `severity_tier: null`, and **no exercises are suggested at all**.
 
 A caveat kept in the open: low `compensation_r2` is ambiguous. It can mean the tracker failed
-*or* that the patient genuinely didn't fixate — which would be real signal, and arguably the
+*or* that the patient genuinely didn't fixate - which would be real signal, and arguably the
 most interesting finding available. Gating on it is the conservative choice; the cost is that a
 genuine severe fixation failure reads as "not usable" rather than "pronounced". Separating the
 two needs a second modality this phase doesn't have.
@@ -322,13 +351,13 @@ published norms. Flags cover amplitude, pace, within-session pace consistency
 (`sweep_duration_cv`), off-axis roll/pitch, and rep count.
 
 **Why advisory rather than blocking.** A single front-facing webcam may not be able to track
-±80° of yaw at all — the face approaches profile and the landmarker degrades. Until that ceiling
+±80° of yaw at all - the face approaches profile and the landmarker degrades. Until that ceiling
 is measured, hard-gating on protocol amplitude would mark every session unusable and discard the
 objective signal entirely. Flip `ENFORCE_AS_GATES = True` in `scoring/protocol.py` to promote
 them to blocking gates once the reachable amplitude is known.
 
 Note also that the Euler decomposition in `face_tracker.py` couples axes at large yaw, so part
-of a high `roll_range_deg` may be decomposition artifact rather than genuine head tilt — another
+of a high `roll_range_deg` may be decomposition artifact rather than genuine head tilt - another
 reason these flag rather than block.
 
 Sessions captured before the aggregate pace fields existed still have `sweeps[]`, so pace is
@@ -350,11 +379,11 @@ limitations list rather than being rediscovered later.
 During a blink the iris landmarks are unreliable and can report a large spurious offset, which
 `_iris_offset()` cannot distinguish from a genuine gaze deviation. Left in, a blink inflates
 `residual_rms` → lowers `fixation_stability_score` → raises the tier. A ~20 s capture at a normal
-blink rate contains roughly 5–7 blinks, so this is the common case rather than an edge case.
+blink rate contains roughly 5-7 blinks, so this is the common case rather than an edge case.
 
-`face_tracker.py` reports a per-eye aperture ratio (vertical opening ÷ eye width; open ≈ 0.25–0.40,
+`face_tracker.py` reports a per-eye aperture ratio (vertical opening ÷ eye width; open ≈ 0.25-0.40,
 collapsing toward 0 when shut). Frames below `min_eye_aperture_ratio` (0.15, provisional) are
-excluded from the gaze fit only — head pose keeps every tracked frame, since a blink doesn't
+excluded from the gaze fit only - head pose keeps every tracked frame, since a blink doesn't
 disturb head rotation. The count appears as `frames_excluded_blink`; `null` means the session
 predates the field, which is not the same as zero.
 
@@ -363,14 +392,101 @@ predates the field, which is not the same as zero.
 This inverts the naive mapping, deliberately. Habituation works by repeated exposure at a
 tolerable intensity, so a more-provoked result yields a **shorter, gentler** starting set
 (seated, eyes open, brief) while a less-provoked result starts nearer the dynamic end of the
-protocol. At `pronounced`, sustained head rotation — the movement the subtest uses to provoke
-symptoms — is withheld from the starting set pending clinician review. A tier→difficulty
+protocol. At `pronounced`, sustained head rotation - the movement the subtest uses to provoke
+symptoms - is withheld from the starting set pending clinician review. A tier→difficulty
 mapping would have handed the most symptomatic person the most aggressive protocol.
 
 Exercises come from the published Cawthorne-Cooksey protocol (Cawthorne 1946; Cooksey 1946),
 with descriptions and frequency norms drawn from patient-facing renderings of it. The catalogue
 lives in one dict in `scoring/exercises.py` with the tier mapping beside it, so it is reviewable
 and editable without touching logic.
+
+---
+
+## Screening indications
+
+`scoring/indications.py` runs twelve checks over one capture and emits a `screening_indications`
+block. Each entry reports a measurement, the threshold it was compared against, what the pattern
+is associated with, what else could explain it, and what test would actually answer the question.
+
+### The panel
+
+| Check | Reads | Screens for signs associated with |
+|---|---|---|
+| `visual_motion_sensitivity` | The severity tier itself | Visual motion sensitivity, post-concussion vestibular involvement, vestibular migraine |
+| `vestibular_asymmetry` | Gaze residual split by turn direction | Unilateral peripheral vestibular hypofunction |
+| `rhythmic_eye_oscillation` | Periodicity of the gaze residual, 1-5 Hz | Nystagmus, central oculomotor disorder |
+| `fixation_breakdown` | Rate of excursions off the compensating path | Saccadic intrusion into smooth pursuit |
+| `horizontal_ocular_misalignment` | Mean interocular horizontal disparity | Horizontal strabismus, convergence insufficiency |
+| `vertical_ocular_misalignment` | Mean interocular vertical disparity | Skew deviation, fourth-nerve palsy, brainstem involvement |
+| `eyelid_asymmetry` | Difference in eyelid opening | Ptosis, third-nerve palsy, Horner syndrome |
+| `fatigable_eyelid_droop` | Fall in opening from first third to last | Fatigable ptosis as in myasthenia gravis |
+| `blink_rate_abnormality` | Blink events per minute | Hypokinetic movement disorders, ocular surface irritation |
+| `facial_asymmetry` | Mouth-corner height difference at rest | Facial nerve palsy, facial weakness as a stroke sign |
+| `cervical_rotation_restriction` | Total yaw range and off-axis coupling | Cervical rotation restriction, cervicogenic dizziness |
+| `head_tremor` | Periodicity of yaw, 2.5-6 Hz | Essential head tremor, titubation |
+
+### The three rules that keep it honest
+
+**No silent nulls.** A check that cannot be computed returns `not_assessable` **with a reason**,
+never `not_indicated`. Reporting a negative off missing data converts an absence of measurement
+into a reassurance, which is the most harmful thing a screening tool can do. On every session
+captured before schema 0.2.0, eleven of the twelve come back `not_assessable`, and the dashboard
+renders that differently from a negative rather than showing a clean-looking panel.
+
+**Every threshold travels with the result.** Both the measured value and the number it was
+compared against are in the output, so a reader can disagree with a threshold without reading
+the source.
+
+**Evidence basis is labelled.** `evidence_basis` separates a published sign carrying a
+provisional threshold from a metric invented in this repository. Three of the twelve are the
+former. Most are the latter, and the reader is told which is which.
+
+### Where it stops
+
+- **Frame rate is the binding constraint on two of them.** Nystagmus and head tremor live at or
+  above half of a 15 fps capture's sampling rate. Both checks compare the rate derived from frame
+  *timestamps* against `MIN_FPS_FOR_FREQUENCY` and decline rather than reporting a number
+  computed at the Nyquist edge. `tracking_quality.effective_fps` is deliberately not used for
+  this: it is frames over wall-clock duration, which counts undetected frames and is skewed by
+  any pause.
+- **No calibration.** Interocular disparities carry an unknown constant bias from the landmark
+  model, which cannot be separated from a small real deviation. Only large values mean anything,
+  which is why those thresholds are loose. The *variability* of a disparity is bias-free and is
+  reported alongside the mean for that reason.
+- **A provocation task, not a resting observation.** Blink rate falls during any demanding
+  visual task, so published resting norms do not transfer and the low bound is set well under
+  them on purpose.
+- **Side labels are unverified.** `tracking/landmarks.py` names its two landmark groups "left"
+  and "right" as MediaPipe indexes them; which anatomical side each falls on has never been
+  checked against a labelled capture here. Anything symmetric is unaffected. Anything reporting a
+  side says the side is unverified, and the eyelid and facial checks tell the reader to confirm
+  it by looking at the person.
+- **Cervical restriction has a deliberate blind band.** Below 60° total rotation the face stays
+  near frontal, so a limit that small is about the person. Above 90° there is no limit worth
+  reporting. Between the two, a webcam losing the face is indistinguishable from a neck that will
+  not turn, so the check returns `not_assessable`. Without that band it fired on essentially
+  every capture, and an indication that is always on carries no information.
+- **Two entries can be emergencies when new.** Vertical misalignment and resting facial
+  asymmetry carry `urgency: emergency_if_new`. This tool cannot tell new from long-standing and
+  cannot triage anyone, so the wording puts that judgement with someone who can ask when it
+  started, and says plainly that nothing on the panel is a reason to believe someone is fine.
+
+### Cross-checks between entries
+
+A head tremor drives a compensating eye movement at its own frequency. Without a cross-check the
+eye channel picks that up and reports it as independent nystagmus, which is one finding counted
+twice under two condition names. When a rhythmic eye component matches an already-measured head
+tremor within 0.6 Hz, the eye entry reports `not_indicated` and says why.
+
+### Stale files
+
+Every scored file written before this module existed carries no panel. `api/repository.py`
+computes one on read in that case and sets `indications_source: "computed"`, which is the one
+exception to its rule about serving stored scores unchanged: the rule exists to stop the API
+contradicting a stored value, and there is no stored value here to contradict. The alternative
+was an empty panel on every existing session, which reads as "nothing was found" rather than
+"nothing was looked for".
 
 ---
 
@@ -383,7 +499,7 @@ reads `sessions/`, and a Next.js frontend that renders it.
 
 You need **two terminals**, both from the project root.
 
-**Terminal 1 — the API:**
+**Terminal 1 - the API:**
 
 ```powershell
 .venv\Scripts\activate
@@ -393,7 +509,7 @@ uvicorn api.main:app --reload --port 8000
 Check it with http://127.0.0.1:8000/docs (an interactive view of the endpoints, generated
 automatically by FastAPI).
 
-**Terminal 2 — the frontend:**
+**Terminal 2 - the frontend:**
 
 ```powershell
 cd web
@@ -417,7 +533,7 @@ The API **never touches the camera stack.** `session/voms_session.py` looks like
 place to import the canonical disclaimer from, but it pulls in `tracking/face_tracker.py` →
 `mediapipe`, dragging the whole capture stack into the web process. Disclaimers come from
 `scoring/` (import-clean) and from the session JSON instead. `tests/test_api.py` enforces this
-in a subprocess — if someone adds a convenient import, that test fails.
+in a subprocess - if someone adds a convenient import, that test fails.
 
 ### What the API does with the three on-disk shapes
 
@@ -432,7 +548,7 @@ logical unit keyed by timestamp, not a file:
 
 Stale scores are served **as-is**, not re-scored. A file written by scoring schema 0.1.0 has no
 `protocol_fidelity`; re-scoring it on read would make the API disagree with the file on disk,
-and this phase is read-only. The UI shows those as "Not assessed" — distinct from "off
+and this phase is read-only. The UI shows those as "Not assessed" - distinct from "off
 protocol", because a check that never ran is not a check that failed.
 
 A malformed file is reported in an `unreadable` list rather than taking down the whole page or
@@ -452,12 +568,12 @@ by letting the two drift. On the detail page the exercise disclaimer and safety 
 
 The browser is a camera and a display. It grabs JPEG frames from the webcam, streams them to
 Python over a WebSocket, and renders the progress Python sends back. **No analysis happens in
-JavaScript.** Every number still comes from `tracking/`, `session/` and `scoring/` — the same
+JavaScript.** Every number still comes from `tracking/`, `session/` and `scoring/` - the same
 code the CLI runs.
 
 That was the central decision, and it was not about convenience. Porting the metrics to
 TypeScript would mean a second implementation of the iris sign convention, blink rejection,
-sweep detection, the gaze fit and the scoring thresholds — all covered by a Python test suite
+sweep detection, the gaze fit and the scoring thresholds - all covered by a Python test suite
 that exists *because* a sign-convention bug in exactly that math silently destroyed the core
 signal once already. Two copies would reintroduce that class of bug with nothing to catch the
 drift.
@@ -468,7 +584,7 @@ supported, and they allow live rep counting *during* the test rather than only a
 
 **MediaPipe is imported lazily**, inside the capture handler. `import api.main` still pulls in
 zero camera-stack modules even with the capture router mounted, so the read-only browsing
-endpoints keep their fast startup — and `tests/test_api.py` still enforces that unchanged.
+endpoints keep their fast startup - and `tests/test_api.py` still enforces that unchanged.
 
 **The pacing metronome is audible, not just visual.** The patient is meant to be staring at
 their own thumb, so an on-screen-only cue would be invisible exactly when it matters. High tone
@@ -477,7 +593,7 @@ what this project found it was getting wrong, and uncontrolled rotation speed is
 sessions incomparable. The panel also shows widest-turn-so-far against the 80° target.
 
 **The preview is mirrored; the captured frames are not.** Mirroring the pixels sent to Python
-would invert head yaw and swap which eye is which — the same left/right confusion that caused
+would invert head yaw and swap which eye is which - the same left/right confusion that caused
 the original bug. The mirror is a CSS transform on the `<video>` element only; the canvas draws
 from the unmirrored source.
 
@@ -488,37 +604,56 @@ files, exactly like `run_session.py --score`, via the shared `session_io.save_se
 
 Frames are timestamped on arrival by the server's monotonic clock rather than by the browser.
 Over loopback that difference is sub-millisecond, and the metrics already use real timestamps
-rather than assuming a fixed rate — but it does mean a stalled tab reads as slow head motion
+rather than assuming a fixed rate - but it does mean a stalled tab reads as slow head motion
 rather than as dropped frames.
 
 ### Notes on the frontend
 
 Built from the shadcn `dashboard-01` block via the CLI, with deliberate departures:
 
-- **The block's `data-table.tsx` was replaced.** Its 874 lines implement drag-to-reorder and
-  row-selection over a `{header, reviewer, target}` document schema. On immutable capture
-  records, a drag handle is an affordance the app can't honour. The replacement keeps the same
-  TanStack Table + shadcn primitives (so it matches visually) and keeps column sorting, which
-  is genuinely useful and server-free. Tier sorting uses clinical order, not alphabetical.
-- **No cross-session trend chart.** The block's chart was demo data. A trend of the composite
-  score would contradict this project's own finding that the objective half is uncalibrated and
-  sensitive to uncontrolled rotation speed — it would look like a measurement while being an
-  artifact of inconsistent technique. Symptom score alone would be a defensible future addition.
-- **Sidebar and user menu stripped.** There's no authentication in this phase, so an avatar
-  would imply a login that doesn't exist, and placeholder nav links teach that things are
-  clickable when they aren't.
-- **Tier colours are not a red/green scale.** These are screening bands, not pass/fail; a green
-  "minimal" badge would read as an all-clear this tool cannot support.
-- **Theme is a light-blue tint, not a wash.** Chroma is kept to 0.01–0.04 on surfaces so large
-  areas stay readable and don't compete with the amber/rose status badges, which carry actual
-  meaning. Headings are Source Serif 4 against Inter body copy. Contrast was measured rather
-  than eyeballed: light `muted-foreground` (the smallest text on the page) is 5.95:1, dark is
-  7.64:1, both past WCAG AA.
+- **The block's `data-table.tsx` was replaced, and then TanStack Table was dropped too.** The
+  block's 874 lines implement drag-to-reorder and row selection over a
+  `{header, reviewer, target}` document schema; on immutable capture records a drag handle is an
+  affordance the app cannot honour. The first replacement kept TanStack. The current one does
+  not: the React Compiler refuses to memoize any component calling `useReactTable`, because the
+  hook returns functions that cannot be memoized safely, so that file was the one compiler
+  bailout in the app and surfaced as a lint error on every run. Sorting seven columns of an
+  already-loaded list is about twenty lines. Tier sorting uses clinical order, not alphabetical.
+- **Row selection now exists, because deletion gives it something to act on.** Sessions are
+  files on disk and captures accumulate quickly while testing; removing them one dialog at a time
+  is tedious enough that people stop, and the list stops being useful.
+- **One trend chart, and only one.** A trend of the *composite* score would contradict this
+  project's own finding that its objective half is uncalibrated and sensitive to uncontrolled
+  rotation speed: it would look like a measurement while being an artifact of technique. The
+  self-reported symptom score has no such problem and is the clinical protocol's actual outcome
+  measure, so that is what `symptom-trend.tsx` plots. Sessions with no score are gaps in the
+  line, never zeros, and sessions whose camera signal failed its gates are drawn hollow.
+- **Sidebar and user menu stripped.** There is no authentication in this phase, so an avatar
+  would imply a login that does not exist, and placeholder nav links teach that things are
+  clickable when they are not.
+- **No green anywhere on a screening result.** Tier badges and indication chips both avoid it.
+  These are screening bands, not pass/fail, and a green "minimal" or "nothing flagged" chip reads
+  as an all-clear this tool cannot support. Slate carries "no signal" without carrying "you are
+  fine". Sequential slate to amber conveys ordering without implying a verdict.
+- **Theme is a blue tint, not a wash, and dark mode works.** Chroma stays at 0.01-0.04 on
+  surfaces so large areas stay readable and do not compete with the amber and rose status
+  colours, which carry actual meaning. Headings are Source Serif 4 against Inter body copy.
+  `next-themes` was already a dependency and `globals.css` already defined a full `.dark`
+  palette, but nothing applied the class, so all of it was dead code and the app was light-only.
+  The provider and a three-state toggle (system, light, dark) are new.
+- **Spacing is hierarchical rather than uniform.** Every gap used to be the same size, so a
+  heading sat as far from the block it labelled as from the unrelated section above it. The
+  `page-stack` utility sets the between-section gap and sections use a smaller internal one. The
+  measure came down from 1360px to 1180px: at 1360 a metric row stretched a two-word label and a
+  five-character number to opposite ends of the screen, and explanatory copy ran to 160
+  characters a line. Prose is capped near 62 to 70 characters.
+- **Motion honours `prefers-reduced-motion`.** Not a formality here: the test this dashboard
+  reports on exists to provoke dizziness, so some readers of it will be dizzy.
 
 Two version-specific gotchas worth knowing if you edit this code:
 
 - **Next.js 16 removed synchronous `params`.** Dynamic pages must `await params`. See
-  `web/AGENTS.md` — that version has breaking changes, and the bundled docs in
+  `web/AGENTS.md` - that version has breaking changes, and the bundled docs in
   `web/node_modules/next/dist/docs/` are the authority.
 - **This shadcn build is on Base UI, not Radix.** Composition uses `render={<Link/>}`, not
   `asChild`. Using `asChild` typechecks as an error rather than failing at runtime.
@@ -530,12 +665,19 @@ gain here.
 
 ## Out of scope
 
-No accounts or authentication, no editing or deleting sessions from the UI, no appointment
-booking, no normative/validated thresholds, and no clinical interpretation — screening signal
-and general exercise suggestions only.
+No accounts or authentication, no editing sessions, no appointment booking, no
+normative or validated thresholds, and no clinical interpretation: screening signals and general
+exercise suggestions only.
+
+Deleting *is* now in scope, one session at a time or several selected together, because captures
+accumulate and an unusable list is its own problem. It is not destructive: `DELETE /sessions/{id}`
+moves the files into `sessions/_deleted/` rather than unlinking them, since a capture records
+something a person physically did and cannot be regenerated from anything else on disk. The paths
+come from `discover()` rather than from joining the incoming id onto a directory, so a
+`../../something` id cannot escape `sessions/`.
 
 Browser capture is intentionally *not* independent of Python: the frontend cannot score a
-session on its own, and is useless without the local API running. That is the point — one
+session on its own, and is useless without the local API running. That is the point - one
 implementation of the metrics, not two.
 
 ## Known limitations
@@ -543,7 +685,20 @@ implementation of the metrics, not two.
 - Gaze offset is uncalibrated; absolute degree values are approximate.
 - `mean_sweep_amplitude_deg` can be pulled down by a partial first sweep if capture starts
   mid-rotation.
-- Trunk rotation is not measured — only head pose is tracked, so head-vs-trunk independence
+- Trunk rotation is not measured - only head pose is tracked, so head-vs-trunk independence
   can't be verified from this data alone.
 - A single-camera face tracker can produce false-positive detections on face-like objects; treat
   `face_detection_rate` as necessary but not sufficient evidence of a valid recording.
+- Frame rate caps the two frequency-based indications. At 15 fps nothing above 7.5 Hz exists, and
+  nystagmus and head tremor both extend past the bands searched. A null result from either is not
+  evidence of absence, and both checks say so rather than implying otherwise.
+- Interocular disparity carries an unremovable constant bias from the landmark model, so the
+  alignment thresholds are loose enough that a small real deviation would not reach them.
+- Left and right labels are unverified against anatomical sides. See
+  `tracking/landmarks.ANATOMICAL_SIDE_CAVEAT`.
+- Facial symmetry needs near-frontal frames, and a test built entirely out of turning the head
+  supplies few unless the subject faces the camera squarely before the sweeps begin. The capture
+  page asks for that; nothing enforces it.
+- Nine of the twelve indications rest on metrics invented here, with thresholds chosen rather
+  than fitted. `evidence_basis` marks each one so this is visible in the output rather than only
+  in this file.

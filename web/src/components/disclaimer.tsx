@@ -26,17 +26,17 @@ function Notice({
 }) {
   const toneClasses =
     tone === "warning"
-      ? "border-amber-300/80 bg-amber-50/80 text-amber-950 dark:border-amber-900/70 dark:bg-amber-950/30 dark:text-amber-100"
-      : "border-border/70 bg-muted/40 text-muted-foreground"
+      ? "border border-amber-300/80 bg-amber-50/80 text-amber-950 dark:border-amber-900/70 dark:bg-amber-950/30 dark:text-amber-100"
+      : "inset-panel text-muted-foreground"
 
   return (
-    <div className={`rounded-lg border px-4 py-3 ${toneClasses}`}>
+    <div className={`rounded-lg px-4 py-3 ${toneClasses}`}>
       <div className="flex gap-3">
         <span className="mt-0.5 shrink-0" aria-hidden="true">
           {icon}
         </span>
-        <div className="space-y-1.5 text-xs leading-relaxed">
-          <p className="text-[0.7rem] font-semibold uppercase tracking-wider">
+        <div className="max-w-[76ch] space-y-1.5 text-xs leading-relaxed">
+          <p className="text-[0.68rem] font-semibold tracking-[0.08em] uppercase">
             {title}
           </p>
           {children}
@@ -79,11 +79,13 @@ export function ExerciseDisclaimer({
 export function SessionDisclaimer({ text }: { text?: string }) {
   if (!text) return null
   return (
-    <details className="group rounded-lg border border-border/70 bg-muted/30 px-4 py-3">
-      <summary className="cursor-pointer text-[0.7rem] font-semibold uppercase tracking-wider text-muted-foreground">
+    <details className="group inset-panel px-4 py-3">
+      <summary className="eyebrow cursor-pointer">
         Disclaimer recorded with this session
       </summary>
-      <p className="mt-2 text-xs leading-relaxed text-muted-foreground">{text}</p>
+      <p className="mt-2 max-w-[76ch] text-xs leading-relaxed text-muted-foreground">
+        {text}
+      </p>
     </details>
   )
 }
@@ -94,11 +96,11 @@ export function SessionDisclaimer({ text }: { text?: string }) {
  */
 export function DisclaimerFooter() {
   return (
-    <footer className="border-t">
-      <p className="mx-auto max-w-[1360px] px-5 py-6 text-center text-xs leading-relaxed text-muted-foreground lg:px-8">
-        Screening data only. Not a clinical determination, and not a diagnosis of
-        any condition. Review with a qualified clinician before acting on anything
-        shown here.
+    <footer className="mt-10 border-t">
+      <p className="mx-auto max-w-[1180px] px-5 py-6 text-center text-xs leading-relaxed text-muted-foreground lg:px-8">
+        Screening data only. Not a clinical determination, and not a diagnosis of any
+        condition. A screening check that flags nothing is not a clearance. Review
+        with a qualified clinician before acting on anything shown here.
       </p>
     </footer>
   )

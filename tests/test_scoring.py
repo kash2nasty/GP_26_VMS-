@@ -422,24 +422,39 @@ def test_new_blocks_avoid_clinical_certainty_language():
                     assert word not in prose, f"{path}: {word!r} in {text!r}"
 
 
+# Written as code points rather than as the characters themselves, so this file can
+# enforce the convention without containing what it bans. That is not fussiness: a
+# pass over the repository that replaced literal dashes with ASCII rewrote these
+# needles too, which silently turned the em-dash check into a check for a plain
+# hyphen and made it fail on the page range in a citation. chr() cannot be caught by
+# that class of edit.
+BANNED_DASHES = {
+    "em dash": chr(0x2014),
+    "en dash": chr(0x2013),
+    "double hyphen": "--",
+}
+
+# Every block of the enriched output that a reader ever sees.
+USER_FACING_BLOCKS = (
+    "screening_summary",
+    "screening_indications",
+    "recommended_exercises",
+)
+
+
 def test_no_em_dashes_in_user_facing_text():
     """House style: no em dashes, en dashes, or ASCII double hyphens in copy.
 
     These strings are authored in Python and rendered verbatim by the web UI, so
     this is the only place the convention can actually be enforced. Comments and
-    docstrings are exempt by construction, since this walks the built output
-    rather than the source.
+    docstrings are exempt by construction, since this walks the built output rather
+    than the source.
     """
-    banned = {
-        "em dash": "—",
-        "en dash": "–",
-        "double hyphen": "--",
-    }
     for tier_case in (6, None, 0):
         enriched = enrich_session(make_session(symptom_score=tier_case))
-        for block_name in ("screening_summary", "recommended_exercises"):
+        for block_name in USER_FACING_BLOCKS:
             for path, text in _strings(enriched[block_name], block_name):
-                for label, needle in banned.items():
+                for label, needle in BANNED_DASHES.items():
                     assert needle not in text, f"{label} in {path}: {text!r}"
 
 
@@ -448,10 +463,10 @@ def test_no_em_dashes_in_insufficient_data_text():
     enriched = enrich_session(make_session(
         symptom_score=None, gaze_shape="absent_keys", head_shape="absent_keys",
     ))
-    for block_name in ("screening_summary", "recommended_exercises"):
+    for block_name in USER_FACING_BLOCKS:
         for path, text in _strings(enriched[block_name], block_name):
-            for needle in ("—", "–", "--"):
-                assert needle not in text, f"{needle!r} in {path}: {text!r}"
+            for label, needle in BANNED_DASHES.items():
+                assert needle not in text, f"{label} in {path}: {text!r}"
 
 
 def test_exercise_blocks_cite_the_protocol():

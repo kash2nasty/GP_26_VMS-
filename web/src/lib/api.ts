@@ -15,6 +15,58 @@ const API_BASE_URL = process.env.API_BASE_URL ?? "http://127.0.0.1:8000"
 
 export type SeverityTier = "minimal" | "mild" | "moderate" | "pronounced"
 
+/** Mirrors scoring/indications.py. */
+export type Finding = "indicated" | "not_indicated" | "not_assessable"
+export type Strength = "borderline" | "present" | "marked"
+export type Urgency = "routine" | "prompt" | "emergency_if_new"
+export type EvidenceBasis =
+  | "published_sign_provisional_threshold"
+  | "bespoke_metric_arbitrary_threshold"
+
+export type Indication = {
+  id: string
+  label: string
+  /** Condition families this pattern is associated with. Never asserted. */
+  screens_for: string[]
+  /** True for the check that restates the subtest itself, i.e. the severity tier. */
+  is_primary?: boolean
+  finding: Finding
+  strength?: Strength | null
+  /** The numbers the decision was made from. Values may be numbers or strings. */
+  measured?: Record<string, number | string | null>
+  thresholds?: Record<string, number | string | number[] | null>
+  interpretation?: string
+  /** Only set when the finding is not_assessable. */
+  reason?: string | null
+  urgency: Urgency
+  evidence_basis: EvidenceBasis
+  caveat?: string | null
+  next_step?: string | null
+  references?: string[]
+}
+
+export type IndicationPanel = {
+  schema_version?: string
+  panel: Indication[]
+  checks_run?: number
+  indicated: string[]
+  /** Flagged checks other than the subtest itself, which the tier already reports. */
+  secondary_indicated?: string[]
+  secondary_checks_run?: number
+  not_assessable: string[]
+  highest_urgency?: Urgency | null
+  summary?: string
+  tracking_sufficient?: boolean
+  disclaimer?: string
+  emergency_note?: string
+  method?: {
+    what_an_indication_means?: string
+    what_not_indicated_means?: string
+    evidence_basis_values?: Record<string, string>
+    shared_gates?: Record<string, number>
+  }
+}
+
 export type Disclaimers = {
   screening: string
   exercises: string
@@ -41,6 +93,12 @@ export type SessionSummary = {
   comparable_to_clinical_protocol?: boolean | null
   scoring_source: "file" | "computed"
   scoring_schema_version?: string | null
+  /** Ids of the indications that crossed their threshold. */
+  indications_indicated?: string[]
+  indications_not_assessable?: number
+  indications_checks_run?: number | null
+  indications_highest_urgency?: Urgency | null
+  indications_source?: "file" | "computed"
 }
 
 export type UnreadableSession = { id: string; error: string }
@@ -162,11 +220,88 @@ export type RecommendedExercises = {
   disclaimer?: string
 }
 
+/**
+ * The measurement blocks added in session schema 0.2.0.
+ *
+ * Every field is optional because every session file already on disk was written
+ * before these existed. The UI must render "never measured" differently from
+ * "measured as zero", which is why nothing here has a default.
+ */
+export type OculomotorSignals = {
+  insufficient_data?: boolean
+  frames_analyzed?: number | null
+  blink_count?: number | null
+  blink_rate_per_min?: number | null
+  mean_blink_duration_s?: number | null
+  fixation_break_count?: number | null
+  fixation_break_rate_per_s?: number | null
+  largest_fixation_break_offset_units?: number | null
+  oscillation_frequency_hz?: number | null
+  oscillation_rhythmicity?: number | null
+  oscillation_amplitude_offset_units?: number | null
+  sample_rate_hz?: number | null
+  oscillation_band_hz?: number[]
+  metric_notes?: string
+}
+
+export type OcularAlignment = {
+  insufficient_data?: boolean
+  frames_analyzed?: number | null
+  horizontal_disparity_mean_offset_units?: number | null
+  horizontal_disparity_std_offset_units?: number | null
+  vertical_disparity_mean_offset_units?: number | null
+  vertical_disparity_std_offset_units?: number | null
+  vertical_disparity_max_offset_units?: number | null
+  metric_notes?: string
+}
+
+export type EyelidSignals = {
+  insufficient_data?: boolean
+  frames_analyzed?: number | null
+  left_aperture_median?: number | null
+  right_aperture_median?: number | null
+  aperture_asymmetry_ratio?: number | null
+  aperture_relative_decline?: number | null
+  aperture_trend_per_min?: number | null
+  fatigue_window_s?: number | null
+  metric_notes?: string
+}
+
+export type HeadControl = {
+  insufficient_data?: boolean
+  leftward_residual_rms_offset_units?: number | null
+  rightward_residual_rms_offset_units?: number | null
+  direction_asymmetry_index?: number | null
+  leftward_sweeps?: number | null
+  rightward_sweeps?: number | null
+  leftward_mean_peak_velocity_dps?: number | null
+  rightward_mean_peak_velocity_dps?: number | null
+  velocity_asymmetry_index?: number | null
+  tremor_frequency_hz?: number | null
+  tremor_rhythmicity?: number | null
+  tremor_amplitude_deg?: number | null
+  sample_rate_hz?: number | null
+  tremor_band_hz?: number[]
+  off_axis_coupling_ratio?: number | null
+  metric_notes?: string
+}
+
+export type FacialSymmetry = {
+  insufficient_data?: boolean
+  frames_analyzed?: number | null
+  mouth_corner_asymmetry?: number | null
+  brow_height_asymmetry?: number | null
+  mouth_corner_asymmetry_spread?: number | null
+  metric_notes?: string
+}
+
 export type SessionDetail = {
   id: string
   captured_at: string | null
   scoring_source: "file" | "computed"
   scoring_schema_version?: string | null
+  /** "computed" when the panel was built on read because the file predates it. */
+  indications_source?: "file" | "computed"
   summary: SessionSummary
   session: {
     schema_version?: string
@@ -193,7 +328,13 @@ export type SessionDetail = {
     }
     head_motion?: HeadMotion
     gaze_stability?: GazeStability
+    oculomotor_signals?: OculomotorSignals
+    ocular_alignment?: OcularAlignment
+    eyelid_signals?: EyelidSignals
+    head_control?: HeadControl
+    facial_symmetry?: FacialSymmetry
     screening_summary?: ScreeningSummary
+    screening_indications?: IndicationPanel
     recommended_exercises?: RecommendedExercises
   }
   disclaimers: Disclaimers

@@ -34,6 +34,11 @@ class FrameRecord:
     # during a blink. Default None so callers predating this field still work.
     left_eye_aperture: float | None = None
     right_eye_aperture: float | None = None
+    # Resting facial symmetry, in face-width units, measured in a head-roll
+    # corrected face frame. Positive means the landmarks.py "left" side sits
+    # higher. None when the face was too far from frontal to measure.
+    mouth_corner_asymmetry: float | None = None
+    brow_height_asymmetry: float | None = None
 
     def to_dict(self):
         return asdict(self)
@@ -142,6 +147,75 @@ def both_eye_apertures(pts):
     return left, right
 
 
+# Beyond this much head yaw the face is turned far enough that perspective
+# foreshortening dominates any real left/right difference, so symmetry is not
+# measured at all rather than measured badly.
+MAX_YAW_FOR_SYMMETRY_DEG = 15.0
+
+
+def _face_frame(pts):
+    """Build a head-roll corrected 2D face frame from the outer eye corners.
+
+    Returns (axis_u, perp_u, width) where axis_u runs between the outer eye
+    corners, perp_u points toward the forehead, and width is the inter-canthal
+    distance used to normalise every measurement. Working in this frame is what
+    makes the symmetry numbers survive head tilt: a tilted head moves both mouth
+    corners in image space but leaves their heights within the face unchanged.
+    """
+    left = pts[LM.LEFT_EYE_OUTER][:2]
+    right = pts[LM.RIGHT_EYE_OUTER][:2]
+    axis = right - left
+    width = float(np.linalg.norm(axis))
+    if width < 1e-6:
+        return None
+    axis_u = axis / width
+
+    perp_u = np.array([-axis_u[1], axis_u[0]])
+    # Orient toward the forehead, whichever way the cross product landed.
+    if np.dot(perp_u, pts[LM.FOREHEAD][:2] - pts[LM.CHIN][:2]) < 0:
+        perp_u = -perp_u
+    return axis_u, perp_u, width
+
+
+def facial_symmetry(pts, head_yaw):
+    """Resting left/right height difference of the mouth corners and brows.
+
+    Returns (mouth_corner_asymmetry, brow_height_asymmetry) in face-width units,
+    or (None, None) when the head was too far from frontal to trust.
+
+    WHY HEIGHTS AND NOT DISTANCES
+        A drooping side of the face shows up as one mouth corner sitting lower
+        than the other and one brow sitting lower than the other. Horizontal
+        distances from the midline change with yaw even on a perfectly symmetric
+        face, whereas heights measured in the face frame do not, so heights are
+        the measurement that survives a subject who is not perfectly square to
+        the camera.
+
+    WHY THE SIGN IS ONLY ADVISORY
+        See LM.ANATOMICAL_SIDE_CAVEAT. The magnitude is measured; which side of
+        the person it belongs to has not been verified in this project.
+    """
+    if head_yaw is not None and abs(head_yaw) > MAX_YAW_FOR_SYMMETRY_DEG:
+        return None, None
+
+    frame = _face_frame(pts)
+    if frame is None:
+        return None, None
+    _, perp_u, width = frame
+
+    def height(index):
+        return float(np.dot(pts[index][:2], perp_u)) / width
+
+    mouth = height(LM.LEFT_MOUTH_CORNER) - height(LM.RIGHT_MOUTH_CORNER)
+    # Brow peaks are compared relative to their own eye, so a naturally uneven
+    # brow line matters less than a brow that has moved away from its eye.
+    brow = (
+        (height(LM.LEFT_BROW_PEAK) - height(LM.LEFT_EYE_TOP))
+        - (height(LM.RIGHT_BROW_PEAK) - height(LM.RIGHT_EYE_TOP))
+    )
+    return float(mouth), float(brow)
+
+
 def both_iris_offsets(pts):
     """Per-eye [horizontal, vertical] iris offsets in a shared sign convention.
 
@@ -204,6 +278,7 @@ class FaceTracker:
         if has_iris:
             left, right = both_iris_offsets(pts)
         left_aperture, right_aperture = both_eye_apertures(pts)
+        mouth_asymmetry, brow_asymmetry = facial_symmetry(pts, yaw)
 
         # The Tasks API exposes no per-face score here, so we report presence-based
         # confidence: the fraction of landmarks that fall inside the frame bounds.
@@ -223,6 +298,8 @@ class FaceTracker:
             landmark_confidence=float(in_bounds),
             left_eye_aperture=left_aperture,
             right_eye_aperture=right_aperture,
+            mouth_corner_asymmetry=mouth_asymmetry,
+            brow_height_asymmetry=brow_asymmetry,
         )
 
     def close(self):

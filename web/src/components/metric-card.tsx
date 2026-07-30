@@ -1,15 +1,23 @@
 /**
  * Metric display for the detail page.
  *
- * Every metric carries a plain-language explanation next to the number. The raw
- * field names (`residual_rms_offset_units`, `compensation_r2`) mean nothing on
- * their own, and a dashboard that shows them bare invites the reader to invent an
+ * Every metric carries a plain-language explanation beside the number. The raw
+ * field names (`residual_rms_offset_units`, `compensation_r2`) mean nothing on their
+ * own, and a dashboard that shows them bare invites the reader to invent an
  * interpretation.
  *
- * Layout note: the value sits on the same baseline as the label with the
- * explanation beneath, rather than label-left / value-right on one row. With help
- * text present, the split-row version left a ragged column of numbers floating
- * beside paragraphs of different heights.
+ * WHAT CHANGED IN THE SPACING, AND WHY IT WAS THE MAIN PROBLEM
+ *     The number used to sit on the same row as its label, hard right, with the
+ *     explanation underneath spanning the full card. On a wide card that put two or
+ *     three words on the left, five characters on the right, and forty centimetres
+ *     of nothing between them, repeated eight times. It also gave the number and
+ *     the label equal visual weight, so the eye had nothing to land on.
+ *
+ *     Now each row is a two-column grid: the number occupies a fixed right-hand
+ *     column of consistent width, so numbers line up down the card as a column
+ *     rather than raggedly tracking whatever the label length happens to be. The
+ *     explanation sits under the label only, inside the left column, so it is
+ *     visibly subordinate to it and its line length stays readable.
  */
 
 import {
@@ -31,19 +39,17 @@ export type Metric = {
 
 export function MetricRow({ metric }: { metric: Metric }) {
   return (
-    <div className="border-b border-border/60 py-2.5 last:border-b-0 first:pt-0">
-      <div className="flex items-baseline justify-between gap-4">
-        <p className="text-sm font-medium">{metric.label}</p>
-        <p
-          className={`shrink-0 font-mono text-sm font-semibold tabular-nums ${
-            metric.muted ? "text-muted-foreground" : "text-foreground"
-          }`}
-        >
-          {metric.value}
-        </p>
-      </div>
+    <div className="grid grid-cols-[1fr_auto] items-baseline gap-x-4 gap-y-1 border-b border-border/50 py-2.5 first:pt-0 last:border-b-0 last:pb-0">
+      <p className="text-sm leading-snug font-medium">{metric.label}</p>
+      <p
+        className={`min-w-[5.5rem] text-right font-mono text-sm font-semibold tabular-nums ${
+          metric.muted ? "text-muted-foreground" : "text-foreground"
+        }`}
+      >
+        {metric.value}
+      </p>
       {metric.help ? (
-        <p className="mt-1 max-w-prose text-xs leading-relaxed text-muted-foreground">
+        <p className="col-start-1 max-w-[54ch] text-xs leading-relaxed text-muted-foreground">
           {metric.help}
         </p>
       ) : null}
@@ -66,11 +72,11 @@ export function MetricCard({
   accent?: boolean
 }) {
   return (
-    <Card className={accent ? "border-primary/30" : undefined}>
-      <CardHeader className="pb-3">
-        <CardTitle className="text-base">{title}</CardTitle>
+    <Card className={accent ? "ring-primary/30" : undefined}>
+      <CardHeader>
+        <CardTitle className="text-[0.95rem]">{title}</CardTitle>
         {description ? (
-          <CardDescription className="leading-relaxed">
+          <CardDescription className="max-w-[58ch] text-xs leading-relaxed">
             {description}
           </CardDescription>
         ) : null}
@@ -85,7 +91,7 @@ export function MetricCard({
   )
 }
 
-/** Compact label/value pair for the hero area. */
+/** Compact label and value pair for the hero area. */
 export function KeyFact({
   label,
   value,
@@ -97,10 +103,8 @@ export function KeyFact({
 }) {
   return (
     <div className="space-y-1.5">
-      <p className="text-[0.7rem] font-medium uppercase tracking-wider text-muted-foreground">
-        {label}
-      </p>
-      <div className="text-lg font-semibold leading-none">{value}</div>
+      <p className="eyebrow">{label}</p>
+      <div className="text-base leading-none font-semibold">{value}</div>
       {detail ? (
         <p className="text-xs leading-relaxed text-muted-foreground">{detail}</p>
       ) : null}

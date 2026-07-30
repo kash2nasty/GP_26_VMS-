@@ -5,7 +5,7 @@ end of a live capture) call enrich_session() so the two routes cannot drift apar
 """
 from __future__ import annotations
 
-from . import exercises, severity
+from . import exercises, indications, severity
 
 
 def enrich_session(session: dict) -> dict:
@@ -13,6 +13,10 @@ def enrich_session(session: dict) -> dict:
 
     The original session data is left untouched, so re-scoring an old file with
     updated logic never destroys the underlying capture.
+
+    Order matters: the indications panel restates the VOMS tier as one of its
+    entries, so it reads the summary rather than recomputing it. Everything else on
+    the panel comes from the measurement blocks in the session itself.
     """
     summary = severity.summarize(session)
     recommendations = exercises.recommend(
@@ -21,6 +25,7 @@ def enrich_session(session: dict) -> dict:
 
     enriched = dict(session)
     enriched["screening_summary"] = summary
+    enriched["screening_indications"] = indications.assess(session, summary)
     enriched["recommended_exercises"] = recommendations
     return enriched
 
@@ -33,9 +38,14 @@ def describe(enriched: dict) -> str:
     status = summary.get("status")
     count = len((enriched.get("recommended_exercises") or {}).get("exercises", []))
 
+    panel = enriched.get("screening_indications") or {}
+    flagged = len(panel.get("indicated") or [])
+    checks = panel.get("checks_run") or 0
+    extra = f", {flagged}/{checks} indications flagged" if checks else ""
+
     if tier is None:
-        return f"screening: no tier assigned (status: {status})"
+        return f"screening: no tier assigned (status: {status}){extra}"
     return (
-        f"screening tier: {tier} (composite {composite}, status: {status}) "
+        f"screening tier: {tier} (composite {composite}, status: {status}){extra} "
         f"- {count} general exercise suggestions"
     )
